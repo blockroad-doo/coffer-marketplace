@@ -276,10 +276,10 @@ contract CofferMarketplaceTest is Test {
         marketplace.list(address(bondNft), bondId, 1 ether, uint64(block.timestamp + 1 days));
     }
 
-    function test_list_revert_bondNotActive() public {
+    function test_list_revert_bondNotOutstanding() public {
         coffer.setMaturityValue(0);
         vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.BondNotActive.selector);
+        vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
         marketplace.list(address(bondNft), bondId, 1 ether, uint64(block.timestamp + 1 days));
     }
 
@@ -452,14 +452,14 @@ contract CofferMarketplaceTest is Test {
         marketplace.buy{value: 1 ether}(address(bondNft), bondId, 1 ether);
     }
 
-    function test_buy_revert_bondNotActive() public {
+    function test_buy_revert_bondNotOutstanding() public {
         vm.prank(seller);
         marketplace.list(address(bondNft), bondId, 1 ether, uint64(block.timestamp + 1 days));
 
         coffer.setMaturityValue(0);
 
         vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.BondNotActive.selector);
+        vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
         marketplace.buy{value: 1 ether}(address(bondNft), bondId, 1 ether);
     }
 
@@ -482,10 +482,10 @@ contract CofferMarketplaceTest is Test {
         marketplace.makeOffer(address(bondNft), bondId, 0, uint64(block.timestamp + 1 days));
     }
 
-    function test_makeOffer_revert_bondNotActive() public {
+    function test_makeOffer_revert_bondNotOutstanding() public {
         coffer.setMaturityValue(0);
         vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.BondNotActive.selector);
+        vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
         marketplace.makeOffer(address(bondNft), bondId, 1 ether, uint64(block.timestamp + 1 days));
     }
 
@@ -970,12 +970,12 @@ contract CofferMarketplaceTest is Test {
 
     // ───── acceptOffer() Missing Branches ─────
 
-    function test_acceptOffer_revert_bondNotActive() public {
+    function test_acceptOffer_revert_bondNotOutstanding() public {
         _makeOfferFrom(buyer, 1 ether);
         coffer.setMaturityValue(0);
 
         vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.BondNotActive.selector);
+        vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
         marketplace.acceptOffer(address(bondNft), bondId, buyer, 1 ether);
     }
 
@@ -1223,7 +1223,7 @@ contract CofferMarketplaceTest is Test {
 
     // ───── View Function Branches ─────
 
-    function test_isListingValid_false_bondNotActive() public {
+    function test_isListingValid_false_bondNotOutstanding() public {
         _listBond(1 ether);
         coffer.setMaturityValue(0);
         assertFalse(marketplace.isListingValid(address(bondNft), bondId));

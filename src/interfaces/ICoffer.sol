@@ -3,7 +3,7 @@ pragma solidity ^0.8.33;
 
 /// @title ICoffer
 /// @author Coffer
-/// @notice Interface for Coffer vault contracts
+/// @notice Interface for Coffer contracts
 interface ICoffer {
     /// @notice Get holder conditions for a specific bond
     /// @param bondId The bond NFT ID

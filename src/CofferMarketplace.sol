@@ -29,7 +29,7 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     error OfferExpired();
     error PriceMismatch();
     error AmountMismatch();
-    error BondNotActive();
+    error BondNotOutstanding();
     error SellerNoLongerOwnsNft();
     error MarketplaceNotApproved();
     error ExpirationNotInFuture();
@@ -380,7 +380,7 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         if (listing.seller == address(0)) return false;
         if (block.timestamp > listing.expiration) return false;
         if (ICofferBondNft(_nftContract).ownerOf(_bondId) != listing.seller) return false;
-        if (!_isBondActive(_nftContract, _bondId)) return false;
+        if (!_isBondOutstanding(_nftContract, _bondId)) return false;
         return true;
     }
 
@@ -398,13 +398,13 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         return true;
     }
 
-    /// @notice Get bond data from the associated Coffer vault
+    /// @notice Get bond data from the associated Coffer
     /// @param _nftContract The NFT contract address
     /// @param _bondId The bond token ID
     /// @return maturityValue The bond maturity value
     /// @return duration The bond duration in seconds
     /// @return startTimestamp The bond start timestamp
-    /// @return cofferAddress The Coffer vault address
+    /// @return cofferAddress The Coffer address
     function getBondData(address _nftContract, uint256 _bondId)
         external
         view
@@ -518,7 +518,7 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         require(_expiration > block.timestamp, ExpirationNotInFuture());
         // slither-disable-next-line calls-loop
         require(ICofferBondNft(_nftContract).ownerOf(_bondId) == _seller, NotOwner());
-        require(_isBondActive(_nftContract, _bondId), BondNotActive());
+        require(_isBondOutstanding(_nftContract, _bondId), BondNotOutstanding());
         // slither-disable-next-line calls-loop
         require(ICofferBondNft(_nftContract).isApprovedForAll(_seller, address(this)), MarketplaceNotApproved());
 
@@ -544,7 +544,7 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         require(listing.seller != address(0), ListingNotFound());
         // solhint-disable-next-line gas-strict-inequalities
         require(block.timestamp <= listing.expiration, ListingExpired());
-        require(_isBondActive(_nftContract, _bondId), BondNotActive());
+        require(_isBondOutstanding(_nftContract, _bondId), BondNotOutstanding());
 
         // Check seller still owns NFT
         // slither-disable-next-line calls-loop
@@ -597,7 +597,7 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     {
         require(_wethAmount > 0, ZeroAmount());
         require(_expiration > block.timestamp, ExpirationNotInFuture());
-        require(_isBondActive(_nftContract, _bondId), BondNotActive());
+        require(_isBondOutstanding(_nftContract, _bondId), BondNotOutstanding());
         // slither-disable-next-line calls-loop
         // solhint-disable-next-line gas-strict-inequalities
         require(IWETH(I_WETH).balanceOf(_buyer) >= _wethAmount, InsufficientWethBalance());
@@ -632,7 +632,7 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         require(o.buyer != address(0), OfferNotFound());
         // solhint-disable-next-line gas-strict-inequalities
         require(block.timestamp <= o.expiration, OfferExpired());
-        require(_isBondActive(_nftContract, _bondId), BondNotActive());
+        require(_isBondOutstanding(_nftContract, _bondId), BondNotOutstanding());
         // slither-disable-next-line calls-loop
         require(ICofferBondNft(_nftContract).ownerOf(_bondId) == _seller, NotOwner());
         require(o.wethAmount == _expectedAmount, AmountMismatch());
@@ -675,11 +675,11 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
 
     // ───── Internal: Helpers ─────
 
-    /// @notice Check if a bond is active (maturityValue != 0)
+    /// @notice Check if a bond is outstanding (maturityValue != 0)
     /// @param _nftContract The NFT contract address
     /// @param _bondId The bond token ID
-    /// @return Whether the bond is active
-    function _isBondActive(address _nftContract, uint256 _bondId) internal view returns (bool) {
+    /// @return Whether the bond is outstanding
+    function _isBondOutstanding(address _nftContract, uint256 _bondId) internal view returns (bool) {
         // slither-disable-next-line calls-loop
         address cofferAddr = ICofferBondNft(_nftContract).cofferOf(_bondId);
         // slither-disable-next-line unused-return,calls-loop

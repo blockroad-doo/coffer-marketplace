@@ -14,9 +14,9 @@ interface ICofferBondNft {
     /// @param bondId The bond token ID to burn
     function burnCofferBond(uint256 bondId) external;
 
-    /// @notice Get the Coffer vault associated with a bond
+    /// @notice Get the Coffer associated with a bond
     /// @param bondId The bond token ID
-    /// @return The Coffer vault address
+    /// @return The Coffer address
     function cofferOf(uint256 bondId) external view returns (address);
 
     /// @notice Get the owner of a bond NFT
