@@ -165,7 +165,7 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     /// @param _fixedFee The fixed fee amount in wei
     /// @param _percentageBps The percentage fee in basis points
     function setFunctionFee(bytes4 _selector, uint128 _fixedFee, uint16 _percentageBps) external onlyOwner {
-        sFunctionFees[_selector] = FunctionFee({ fixedFee: _fixedFee, percentageBps: _percentageBps });
+        sFunctionFees[_selector] = FunctionFee({fixedFee: _fixedFee, percentageBps: _percentageBps});
         emit FunctionFeeSet(_selector, _fixedFee, _percentageBps);
     }
 
