@@ -50,7 +50,6 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         address seller;
         uint128 price;
         uint64 expiration;
-        address nftContract;
     }
 
     struct Offer {
@@ -63,16 +62,18 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
 
     /// @notice Immutable WETH token contract address
     address public immutable I_WETH;
+    /// @notice Immutable CofferBondNft contract address
+    address public immutable I_COFFER_BOND_NFT;
 
     /// @notice Address that receives collected fees
     address public sFeeRecipient;
     /// @notice Fee configuration for each function selector
     mapping(bytes4 => FunctionFee) public sFunctionFees;
 
-    /// @notice Active listings indexed by NFT contract and bond ID
-    mapping(address nftContract => mapping(uint256 bondId => Listing)) public sListings;
-    /// @notice Active offers indexed by NFT contract, bond ID, and buyer
-    mapping(address nftContract => mapping(uint256 bondId => mapping(address buyer => Offer))) public sOffers;
+    /// @notice Active listings indexed by bond ID
+    mapping(uint256 bondId => Listing) public sListings;
+    /// @notice Active offers indexed by bond ID and buyer
+    mapping(uint256 bondId => mapping(address buyer => Offer)) public sOffers;
 
     // ───── Events ─────
 
@@ -90,64 +91,48 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     event FeeCollected(bytes4 indexed selector, uint256 indexed fee);
 
     /// @notice Emitted when a bond NFT is listed for sale
-    /// @param nftContract The NFT contract address
     /// @param bondId The bond token ID
     /// @param seller The seller address
     /// @param price The listing price in wei
     /// @param expiration The listing expiration timestamp
-    event Listed(
-        address indexed nftContract, uint256 indexed bondId, address indexed seller, uint128 price, uint64 expiration
-    );
+    event Listed(uint256 indexed bondId, address indexed seller, uint128 indexed price, uint64 expiration);
     /// @notice Emitted when a listing is cancelled
-    /// @param nftContract The NFT contract address
     /// @param bondId The bond token ID
     /// @param seller The seller address
-    event ListingCancelled(address indexed nftContract, uint256 indexed bondId, address indexed seller);
+    event ListingCancelled(uint256 indexed bondId, address indexed seller);
     /// @notice Emitted when a listed bond NFT is purchased
-    /// @param nftContract The NFT contract address
     /// @param bondId The bond token ID
     /// @param buyer The buyer address
     /// @param seller The seller address
     /// @param price The purchase price in wei
-    event ListingPurchased(
-        address indexed nftContract, uint256 indexed bondId, address buyer, address indexed seller, uint128 price
-    );
+    event ListingPurchased(uint256 indexed bondId, address indexed buyer, address indexed seller, uint128 price);
 
     /// @notice Emitted when a WETH offer is made on a bond NFT
-    /// @param nftContract The NFT contract address
     /// @param bondId The bond token ID
     /// @param buyer The buyer address
     /// @param wethAmount The WETH offer amount
     /// @param expiration The offer expiration timestamp
-    event OfferMade(
-        address indexed nftContract,
-        uint256 indexed bondId,
-        address indexed buyer,
-        uint128 wethAmount,
-        uint64 expiration
-    );
+    event OfferMade(uint256 indexed bondId, address indexed buyer, uint128 indexed wethAmount, uint64 expiration);
     /// @notice Emitted when an offer is cancelled
-    /// @param nftContract The NFT contract address
     /// @param bondId The bond token ID
     /// @param buyer The buyer address
-    event OfferCancelled(address indexed nftContract, uint256 indexed bondId, address indexed buyer);
+    event OfferCancelled(uint256 indexed bondId, address indexed buyer);
     /// @notice Emitted when a WETH offer is accepted by the NFT owner
-    /// @param nftContract The NFT contract address
     /// @param bondId The bond token ID
     /// @param buyer The buyer address
     /// @param seller The seller address
     /// @param wethAmount The WETH amount of the accepted offer
-    event OfferAccepted(
-        address indexed nftContract, uint256 indexed bondId, address indexed buyer, address seller, uint128 wethAmount
-    );
+    event OfferAccepted(uint256 indexed bondId, address indexed buyer, address indexed seller, uint128 wethAmount);
 
     // ───── Constructor ─────
 
-    constructor(address _owner, address _feeRecipient, address _weth) Ownable(_owner) {
+    constructor(address _owner, address _feeRecipient, address _weth, address _cofferBondNft) Ownable(_owner) {
         require(_feeRecipient != address(0), ZeroAddress());
         require(_weth != address(0), ZeroAddress());
+        require(_cofferBondNft != address(0), ZeroAddress());
         sFeeRecipient = _feeRecipient;
         I_WETH = _weth;
+        I_COFFER_BOND_NFT = _cofferBondNft;
     }
 
     // ───── Admin ─────
@@ -172,82 +157,67 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     // ───── Listing Functions ─────
 
     /// @notice List a bond NFT for sale
-    /// @param _nftContract The NFT contract address
     /// @param _bondId The bond token ID to list
     /// @param _price The listing price in wei
     /// @param _expiration The listing expiration timestamp
-    function list(address _nftContract, uint256 _bondId, uint128 _price, uint64 _expiration) external payable {
+    function list(uint256 _bondId, uint128 _price, uint64 _expiration) external payable {
         uint256 remaining = _collectFee(this.list.selector, msg.value);
         require(remaining == 0, InsufficientPayment());
-        _list(msg.sender, _nftContract, _bondId, _price, _expiration);
+        _list(msg.sender, _bondId, _price, _expiration);
     }
 
     /// @notice Cancel an active listing
-    /// @param _nftContract The NFT contract address
     /// @param _bondId The bond token ID to cancel
-    function cancelListing(address _nftContract, uint256 _bondId) external {
-        _cancelListing(msg.sender, _nftContract, _bondId);
+    function cancelListing(uint256 _bondId) external {
+        _cancelListing(msg.sender, _bondId);
     }
 
     /// @notice Purchase a listed bond NFT
-    /// @param _nftContract The NFT contract address
     /// @param _bondId The bond token ID to purchase
     /// @param _expectedPrice The expected listing price to prevent front-running
-    function buy(address _nftContract, uint256 _bondId, uint128 _expectedPrice) external payable nonReentrant {
-        _buy(msg.sender, _nftContract, _bondId, _expectedPrice, msg.value);
+    function buy(uint256 _bondId, uint128 _expectedPrice) external payable nonReentrant {
+        _buy(msg.sender, _bondId, _expectedPrice, msg.value);
     }
 
     // ───── Offer Functions ─────
 
     /// @notice Make a WETH offer on a bond NFT
-    /// @param _nftContract The NFT contract address
     /// @param _bondId The bond token ID to make an offer on
     /// @param _wethAmount The WETH amount to offer
     /// @param _expiration The offer expiration timestamp
-    function makeOffer(address _nftContract, uint256 _bondId, uint128 _wethAmount, uint64 _expiration)
-        external
-        payable
-    {
+    function makeOffer(uint256 _bondId, uint128 _wethAmount, uint64 _expiration) external payable {
         uint256 remaining = _collectFee(this.makeOffer.selector, msg.value);
         require(remaining == 0, InsufficientPayment());
-        _makeOffer(msg.sender, _nftContract, _bondId, _wethAmount, _expiration);
+        _makeOffer(msg.sender, _bondId, _wethAmount, _expiration);
     }
 
     /// @notice Cancel an active offer
-    /// @param _nftContract The NFT contract address
     /// @param _bondId The bond token ID to cancel the offer for
-    function cancelOffer(address _nftContract, uint256 _bondId) external {
-        _cancelOffer(msg.sender, _nftContract, _bondId);
+    function cancelOffer(uint256 _bondId) external {
+        _cancelOffer(msg.sender, _bondId);
     }
 
     /// @notice Accept a WETH offer on a bond NFT you own
-    /// @param _nftContract The NFT contract address
     /// @param _bondId The bond token ID
     /// @param _buyer The address of the offer maker
     /// @param _expectedAmount The expected WETH amount to prevent front-running
-    function acceptOffer(address _nftContract, uint256 _bondId, address _buyer, uint128 _expectedAmount)
-        external
-        payable
-        nonReentrant
-    {
-        _acceptOffer(msg.sender, _nftContract, _bondId, _buyer, _expectedAmount, msg.value);
+    function acceptOffer(uint256 _bondId, address _buyer, uint128 _expectedAmount) external payable nonReentrant {
+        _acceptOffer(msg.sender, _bondId, _buyer, _expectedAmount, msg.value);
     }
 
     // ───── Batch Functions ─────
 
     /// @notice Batch list multiple bond NFTs
-    /// @param _nftContracts The NFT contract addresses
     /// @param _bondIds The bond token IDs to list
     /// @param _prices The listing prices in wei
     /// @param _expirations The listing expiration timestamps
-    function batchList(
-        address[] calldata _nftContracts,
-        uint256[] calldata _bondIds,
-        uint128[] calldata _prices,
-        uint64[] calldata _expirations
-    ) external payable nonReentrant {
-        uint256 len = _nftContracts.length;
-        require(len == _bondIds.length && len == _prices.length && len == _expirations.length, ArrayLengthMismatch());
+    function batchList(uint256[] calldata _bondIds, uint128[] calldata _prices, uint64[] calldata _expirations)
+        external
+        payable
+        nonReentrant
+    {
+        uint256 len = _bondIds.length;
+        require(len == _prices.length && len == _expirations.length, ArrayLengthMismatch());
 
         uint256 totalRemaining = msg.value;
         for (uint256 i; i < len; ++i) {
@@ -257,28 +227,23 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
             require(totalRemaining >= feeForThis, InsufficientFee());
             totalRemaining -= feeForThis;
             _distributeFee(this.list.selector, feeForThis);
-            _list(msg.sender, _nftContracts[i], _bondIds[i], _prices[i], _expirations[i]);
+            _list(msg.sender, _bondIds[i], _prices[i], _expirations[i]);
         }
     }
 
     /// @notice Batch buy multiple listed bond NFTs
-    /// @param _nftContracts The NFT contract addresses
     /// @param _bondIds The bond token IDs to purchase
     /// @param _expectedPrices The expected listing prices to prevent front-running
-    function batchBuy(address[] calldata _nftContracts, uint256[] calldata _bondIds, uint128[] calldata _expectedPrices)
-        external
-        payable
-        nonReentrant
-    {
-        uint256 len = _nftContracts.length;
-        require(len == _bondIds.length && len == _expectedPrices.length, ArrayLengthMismatch());
+    function batchBuy(uint256[] calldata _bondIds, uint128[] calldata _expectedPrices) external payable nonReentrant {
+        uint256 len = _bondIds.length;
+        require(len == _expectedPrices.length, ArrayLengthMismatch());
 
         uint256 totalRemaining = msg.value;
         for (uint256 i; i < len; ++i) {
             uint256 gross = _grossForPrice(this.buy.selector, _expectedPrices[i]);
             // solhint-disable-next-line gas-strict-inequalities
             require(totalRemaining >= gross, InsufficientPayment());
-            _buy(msg.sender, _nftContracts[i], _bondIds[i], _expectedPrices[i], gross);
+            _buy(msg.sender, _bondIds[i], _expectedPrices[i], gross);
             totalRemaining -= gross;
         }
 
@@ -291,32 +256,24 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     }
 
     /// @notice Batch cancel multiple listings
-    /// @param _nftContracts The NFT contract addresses
     /// @param _bondIds The bond token IDs to cancel
-    function batchCancelListings(address[] calldata _nftContracts, uint256[] calldata _bondIds) external {
-        uint256 len = _nftContracts.length;
-        require(len == _bondIds.length, ArrayLengthMismatch());
-
-        for (uint256 i; i < len; ++i) {
-            _cancelListing(msg.sender, _nftContracts[i], _bondIds[i]);
+    function batchCancelListings(uint256[] calldata _bondIds) external {
+        for (uint256 i; i < _bondIds.length; ++i) {
+            _cancelListing(msg.sender, _bondIds[i]);
         }
     }
 
     /// @notice Batch make multiple WETH offers
-    /// @param _nftContracts The NFT contract addresses
     /// @param _bondIds The bond token IDs to make offers on
     /// @param _wethAmounts The WETH amounts to offer
     /// @param _expirations The offer expiration timestamps
     function batchMakeOffers(
-        address[] calldata _nftContracts,
         uint256[] calldata _bondIds,
         uint128[] calldata _wethAmounts,
         uint64[] calldata _expirations
     ) external payable nonReentrant {
-        uint256 len = _nftContracts.length;
-        require(
-            len == _bondIds.length && len == _wethAmounts.length && len == _expirations.length, ArrayLengthMismatch()
-        );
+        uint256 len = _bondIds.length;
+        require(len == _wethAmounts.length && len == _expirations.length, ArrayLengthMismatch());
 
         uint256 totalRemaining = msg.value;
         for (uint256 i; i < len; ++i) {
@@ -326,37 +283,29 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
             require(totalRemaining >= feeForThis, InsufficientFee());
             totalRemaining -= feeForThis;
             _distributeFee(this.makeOffer.selector, feeForThis);
-            _makeOffer(msg.sender, _nftContracts[i], _bondIds[i], _wethAmounts[i], _expirations[i]);
+            _makeOffer(msg.sender, _bondIds[i], _wethAmounts[i], _expirations[i]);
         }
     }
 
     /// @notice Batch cancel multiple offers
-    /// @param _nftContracts The NFT contract addresses
     /// @param _bondIds The bond token IDs to cancel offers for
-    function batchCancelOffers(address[] calldata _nftContracts, uint256[] calldata _bondIds) external {
-        uint256 len = _nftContracts.length;
-        require(len == _bondIds.length, ArrayLengthMismatch());
-
-        for (uint256 i; i < len; ++i) {
-            _cancelOffer(msg.sender, _nftContracts[i], _bondIds[i]);
+    function batchCancelOffers(uint256[] calldata _bondIds) external {
+        for (uint256 i; i < _bondIds.length; ++i) {
+            _cancelOffer(msg.sender, _bondIds[i]);
         }
     }
 
     /// @notice Batch accept multiple WETH offers
-    /// @param _nftContracts The NFT contract addresses
     /// @param _bondIds The bond token IDs
     /// @param _buyers The addresses of the offer makers
     /// @param _expectedAmounts The expected WETH amounts to prevent front-running
     function batchAcceptOffers(
-        address[] calldata _nftContracts,
         uint256[] calldata _bondIds,
         address[] calldata _buyers,
         uint128[] calldata _expectedAmounts
     ) external payable nonReentrant {
-        uint256 len = _nftContracts.length;
-        require(
-            len == _bondIds.length && len == _buyers.length && len == _expectedAmounts.length, ArrayLengthMismatch()
-        );
+        uint256 len = _bondIds.length;
+        require(len == _buyers.length && len == _expectedAmounts.length, ArrayLengthMismatch());
 
         uint256 totalRemaining = msg.value;
         for (uint256 i; i < len; ++i) {
@@ -365,32 +314,30 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
             // solhint-disable-next-line gas-strict-inequalities
             require(totalRemaining >= acceptFeeEth, InsufficientFee());
             totalRemaining -= acceptFeeEth;
-            _acceptOffer(msg.sender, _nftContracts[i], _bondIds[i], _buyers[i], _expectedAmounts[i], acceptFeeEth);
+            _acceptOffer(msg.sender, _bondIds[i], _buyers[i], _expectedAmounts[i], acceptFeeEth);
         }
     }
 
     // ───── View Functions ─────
 
     /// @notice Check if a listing is currently valid
-    /// @param _nftContract The NFT contract address
     /// @param _bondId The bond token ID
     /// @return Whether the listing is valid
-    function isListingValid(address _nftContract, uint256 _bondId) external view returns (bool) {
-        Listing memory listing = sListings[_nftContract][_bondId];
+    function isListingValid(uint256 _bondId) external view returns (bool) {
+        Listing memory listing = sListings[_bondId];
         if (listing.seller == address(0)) return false;
         if (block.timestamp > listing.expiration) return false;
-        if (ICofferBondNft(_nftContract).ownerOf(_bondId) != listing.seller) return false;
-        if (!_isBondOutstanding(_nftContract, _bondId)) return false;
+        if (ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) != listing.seller) return false;
+        if (!_isBondOutstanding(_bondId)) return false;
         return true;
     }
 
     /// @notice Check if an offer is currently valid
-    /// @param _nftContract The NFT contract address
     /// @param _bondId The bond token ID
     /// @param _buyer The address of the offer maker
     /// @return Whether the offer is valid
-    function isOfferValid(address _nftContract, uint256 _bondId, address _buyer) external view returns (bool) {
-        Offer memory o = sOffers[_nftContract][_bondId][_buyer];
+    function isOfferValid(uint256 _bondId, address _buyer) external view returns (bool) {
+        Offer memory o = sOffers[_bondId][_buyer];
         if (o.buyer == address(0)) return false;
         if (block.timestamp > o.expiration) return false;
         if (IWETH(I_WETH).balanceOf(_buyer) < o.wethAmount) return false;
@@ -399,18 +346,17 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     }
 
     /// @notice Get bond data from the associated Coffer
-    /// @param _nftContract The NFT contract address
     /// @param _bondId The bond token ID
     /// @return maturityValue The bond maturity value
     /// @return duration The bond duration in seconds
     /// @return startTimestamp The bond start timestamp
     /// @return cofferAddress The Coffer address
-    function getBondData(address _nftContract, uint256 _bondId)
+    function getBondData(uint256 _bondId)
         external
         view
         returns (uint128 maturityValue, uint32 duration, uint32 startTimestamp, address cofferAddress)
     {
-        cofferAddress = ICofferBondNft(_nftContract).cofferOf(_bondId);
+        cofferAddress = ICofferBondNft(I_COFFER_BOND_NFT).cofferOf(_bondId);
         (maturityValue, duration, startTimestamp) = ICoffer(cofferAddress).sHolderConditions(_bondId);
     }
 
@@ -511,44 +457,40 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
 
     // ───── Internal: Listing Logic ─────
 
-    function _list(address _seller, address _nftContract, uint256 _bondId, uint128 _price, uint64 _expiration)
-        internal
-    {
+    function _list(address _seller, uint256 _bondId, uint128 _price, uint64 _expiration) internal {
         require(_price > 0, ZeroPrice());
         require(_expiration > block.timestamp, ExpirationNotInFuture());
         // slither-disable-next-line calls-loop
-        require(ICofferBondNft(_nftContract).ownerOf(_bondId) == _seller, NotOwner());
-        require(_isBondOutstanding(_nftContract, _bondId), BondNotOutstanding());
+        require(ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) == _seller, NotOwner());
+        require(_isBondOutstanding(_bondId), BondNotOutstanding());
         // slither-disable-next-line calls-loop
-        require(ICofferBondNft(_nftContract).isApprovedForAll(_seller, address(this)), MarketplaceNotApproved());
+        require(ICofferBondNft(I_COFFER_BOND_NFT).isApprovedForAll(_seller, address(this)), MarketplaceNotApproved());
 
         // slither-disable-next-line reentrancy-no-eth
-        sListings[_nftContract][_bondId] =
-            Listing({seller: _seller, price: _price, expiration: _expiration, nftContract: _nftContract});
+        sListings[_bondId] = Listing({seller: _seller, price: _price, expiration: _expiration});
 
-        emit Listed(_nftContract, _bondId, _seller, _price, _expiration);
+        emit Listed(_bondId, _seller, _price, _expiration);
     }
 
-    function _cancelListing(address _caller, address _nftContract, uint256 _bondId) internal {
-        Listing memory listing = sListings[_nftContract][_bondId];
+    function _cancelListing(address _caller, uint256 _bondId) internal {
+        Listing memory listing = sListings[_bondId];
         require(listing.seller == _caller, NotSeller());
 
-        delete sListings[_nftContract][_bondId];
-        emit ListingCancelled(_nftContract, _bondId, _caller);
+        // slither-disable-next-line costly-loop
+        delete sListings[_bondId];
+        emit ListingCancelled(_bondId, _caller);
     }
 
-    function _buy(address _buyer, address _nftContract, uint256 _bondId, uint128 _expectedPrice, uint256 _payment)
-        internal
-    {
-        Listing memory listing = sListings[_nftContract][_bondId];
+    function _buy(address _buyer, uint256 _bondId, uint128 _expectedPrice, uint256 _payment) internal {
+        Listing memory listing = sListings[_bondId];
         require(listing.seller != address(0), ListingNotFound());
         // solhint-disable-next-line gas-strict-inequalities
         require(block.timestamp <= listing.expiration, ListingExpired());
-        require(_isBondOutstanding(_nftContract, _bondId), BondNotOutstanding());
+        require(_isBondOutstanding(_bondId), BondNotOutstanding());
 
         // Check seller still owns NFT
         // slither-disable-next-line calls-loop
-        require(ICofferBondNft(_nftContract).ownerOf(_bondId) == listing.seller, SellerNoLongerOwnsNft());
+        require(ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) == listing.seller, SellerNoLongerOwnsNft());
 
         require(listing.price == _expectedPrice, PriceMismatch());
         require(_buyer != listing.seller, CannotBuyOwnListing());
@@ -559,12 +501,12 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         require(remaining >= listing.price, InsufficientPayment());
 
         // CEI: delete listing before external calls
-        // slither-disable-next-line reentrancy-no-eth
-        delete sListings[_nftContract][_bondId];
+        // slither-disable-next-line reentrancy-no-eth,costly-loop
+        delete sListings[_bondId];
 
         // Transfer NFT from seller to buyer (seller approved marketplace in _list)
         // slither-disable-next-line arbitrary-send-erc20,calls-loop
-        ICofferBondNft(_nftContract).transferFrom(listing.seller, _buyer, _bondId);
+        ICofferBondNft(I_COFFER_BOND_NFT).transferFrom(listing.seller, _buyer, _bondId);
 
         // Send price to seller
         // slither-disable-next-line arbitrary-send-eth,calls-loop
@@ -587,17 +529,15 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
             require(okRefund, InsufficientPayment());
         }
 
-        emit ListingPurchased(_nftContract, _bondId, _buyer, listing.seller, listing.price);
+        emit ListingPurchased(_bondId, _buyer, listing.seller, listing.price);
     }
 
     // ───── Internal: Offer Logic ─────
 
-    function _makeOffer(address _buyer, address _nftContract, uint256 _bondId, uint128 _wethAmount, uint64 _expiration)
-        internal
-    {
+    function _makeOffer(address _buyer, uint256 _bondId, uint128 _wethAmount, uint64 _expiration) internal {
         require(_wethAmount > 0, ZeroAmount());
         require(_expiration > block.timestamp, ExpirationNotInFuture());
-        require(_isBondOutstanding(_nftContract, _bondId), BondNotOutstanding());
+        require(_isBondOutstanding(_bondId), BondNotOutstanding());
         // slither-disable-next-line calls-loop
         // solhint-disable-next-line gas-strict-inequalities
         require(IWETH(I_WETH).balanceOf(_buyer) >= _wethAmount, InsufficientWethBalance());
@@ -606,35 +546,33 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         require(IWETH(I_WETH).allowance(_buyer, address(this)) >= _wethAmount, InsufficientWethAllowance());
 
         // slither-disable-next-line reentrancy-no-eth
-        sOffers[_nftContract][_bondId][_buyer] =
-            Offer({buyer: _buyer, wethAmount: _wethAmount, expiration: _expiration});
+        sOffers[_bondId][_buyer] = Offer({buyer: _buyer, wethAmount: _wethAmount, expiration: _expiration});
 
-        emit OfferMade(_nftContract, _bondId, _buyer, _wethAmount, _expiration);
+        emit OfferMade(_bondId, _buyer, _wethAmount, _expiration);
     }
 
-    function _cancelOffer(address _caller, address _nftContract, uint256 _bondId) internal {
-        Offer memory o = sOffers[_nftContract][_bondId][_caller];
+    function _cancelOffer(address _caller, uint256 _bondId) internal {
+        Offer memory o = sOffers[_bondId][_caller];
         require(o.buyer == _caller, NotBuyer());
 
-        delete sOffers[_nftContract][_bondId][_caller];
-        emit OfferCancelled(_nftContract, _bondId, _caller);
+        delete sOffers[_bondId][_caller];
+        emit OfferCancelled(_bondId, _caller);
     }
 
     function _acceptOffer(
         address _seller,
-        address _nftContract,
         uint256 _bondId,
         address _buyer,
         uint128 _expectedAmount,
         uint256 _ethPayment
     ) internal {
-        Offer memory o = sOffers[_nftContract][_bondId][_buyer];
+        Offer memory o = sOffers[_bondId][_buyer];
         require(o.buyer != address(0), OfferNotFound());
         // solhint-disable-next-line gas-strict-inequalities
         require(block.timestamp <= o.expiration, OfferExpired());
-        require(_isBondOutstanding(_nftContract, _bondId), BondNotOutstanding());
+        require(_isBondOutstanding(_bondId), BondNotOutstanding());
         // slither-disable-next-line calls-loop
-        require(ICofferBondNft(_nftContract).ownerOf(_bondId) == _seller, NotOwner());
+        require(ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) == _seller, NotOwner());
         require(o.wethAmount == _expectedAmount, AmountMismatch());
         // Verify buyer still has sufficient WETH
         // slither-disable-next-line calls-loop
@@ -647,7 +585,7 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         (uint256 wethFee, uint256 sellerProceeds) = _calculateWethFee(this.acceptOffer.selector, o.wethAmount);
 
         // CEI: delete offer before external calls
-        delete sOffers[_nftContract][_bondId][_buyer];
+        delete sOffers[_bondId][_buyer];
 
         // Collect optional ETH fee for acceptOffer action itself
         if (_ethPayment > 0) {
@@ -668,20 +606,19 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         IERC20(I_WETH).safeTransfer(_seller, sellerProceeds);
         // Transfer NFT from seller to buyer
         // slither-disable-next-line calls-loop
-        ICofferBondNft(_nftContract).transferFrom(_seller, _buyer, _bondId);
+        ICofferBondNft(I_COFFER_BOND_NFT).transferFrom(_seller, _buyer, _bondId);
 
-        emit OfferAccepted(_nftContract, _bondId, _buyer, _seller, o.wethAmount);
+        emit OfferAccepted(_bondId, _buyer, _seller, o.wethAmount);
     }
 
     // ───── Internal: Helpers ─────
 
     /// @notice Check if a bond is outstanding (maturityValue != 0)
-    /// @param _nftContract The NFT contract address
     /// @param _bondId The bond token ID
     /// @return Whether the bond is outstanding
-    function _isBondOutstanding(address _nftContract, uint256 _bondId) internal view returns (bool) {
+    function _isBondOutstanding(uint256 _bondId) internal view returns (bool) {
         // slither-disable-next-line calls-loop
-        address cofferAddr = ICofferBondNft(_nftContract).cofferOf(_bondId);
+        address cofferAddr = ICofferBondNft(I_COFFER_BOND_NFT).cofferOf(_bondId);
         // slither-disable-next-line unused-return,calls-loop
         (uint128 maturityValue,,) = ICoffer(cofferAddr).sHolderConditions(_bondId);
         return maturityValue != 0;
