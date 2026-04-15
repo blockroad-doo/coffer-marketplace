@@ -2,7 +2,7 @@
 
 A secondary marketplace for trading [Coffer Bond NFTs](#what-is-a-coffer-bond-nft). Two trading mechanisms are supported: **ETH listings** (seller sets a price, buyer pays ETH) and **WETH offers** (buyer deposits an offer in WETH, seller accepts).
 
-Built with Solidity ^0.8.33, [Foundry](https://book.getfoundry.sh/), and OpenZeppelin (`ReentrancyGuard`, `SafeERC20`).
+Built with Solidity 0.8.34, [Foundry](https://book.getfoundry.sh/), and OpenZeppelin (`ReentrancyGuard`, `SafeERC20`).
 
 > **Trustless design** — the contract has no owner, no admin functions, and no fee system. All payments go directly between buyers and sellers with zero intermediary extraction.
 
@@ -204,15 +204,31 @@ All single operations have batch counterparts for gas-efficient multi-bond trans
 
 ## Architecture
 
-![Architecture](assets/architecture.svg)
+```mermaid
+flowchart LR
+    Seller(["&nbsp;&nbsp;&nbsp; Seller &nbsp;&nbsp;&nbsp;"])
+    Buyer(["&nbsp;&nbsp;&nbsp; Buyer &nbsp;&nbsp;&nbsp;"])
 
-<details>
-<summary>Editing the diagram</summary>
+    subgraph Marketplace["CofferMarketplace"]
+        L["list · buy · cancelListing"]
+        L ~~~ O
+        O["makeOffer · acceptOffer · cancelOffer"]
+    end
 
-The canonical source is `assets/architecture.excalidraw`.
-Open it at [excalidraw.com](https://excalidraw.com), edit, then **Export → SVG** to `assets/architecture.svg`.
-Commit both files.
-</details>
+    BondNft["CofferBondNft · ERC-721"]
+    Coffer["Coffer"]
+    WETH["WETH · ERC-20"]
+
+    Seller -- "list / acceptOffer" --> Marketplace
+    Buyer -- "buy / makeOffer" --> Marketplace
+    Marketplace -. "ETH / WETH" .-> Seller
+    Marketplace -. "NFT" .-> Buyer
+    Marketplace -- "safeTransferFrom / ownerOf" --> BondNft
+    BondNft -- "cofferOf" --> Coffer
+    Marketplace -- "safeTransferFrom" --> WETH
+```
+
+> **Safety**: ReentrancyGuard, CEI pattern, front-running protection, bond outstanding check. All single operations have batch variants. 3 view functions.
 
 ### Immutables
 
