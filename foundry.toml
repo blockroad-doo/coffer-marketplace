@@ -2,10 +2,38 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+solc = "0.8.34"
 remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
 no_match_coverage = "^test/|^script/|^integration/"
-
-[profile.ci]
+no_match_path =  "test/{invariant,integration}/*" #comment this line if wan to test invariants with -> forge test --mp "test/invariant/*"
 
 [fuzz]
 runs = 1024
+
+# ── Invariant Fuzz Testing ──────────────────────────────────────────────
+# Run all tests (unit + invariant):      forge test
+# Run ONLY invariant tests:              forge test --match-path "test/invariant/*"
+# Run ONLY unit tests (skip invariant):  forge test --match-path "test/unit/*"
+# Run strict invariant mode:             FOUNDRY_PROFILE=strict forge test --match-path "test/invariant/*"
+# Coverage (already excludes test/):     forge coverage --report summary
+#
+# To disable invariant tests entirely, comment out [invariant] and
+# [profile.strict.invariant] sections below.
+# ────────────────────────────────────────────────────────────────────────
+
+[invariant]
+runs = 512
+depth = 64
+fail_on_revert = false
+
+[profile.strict.invariant]
+runs = 512
+depth = 64
+fail_on_revert = true
+
+# CI profile skips invariant tests (slow)
+[profile.ci]
+no_match_path = "test/invariant/*"
+
+[lint]
+exclude_lints = ["mixed-case-function"]

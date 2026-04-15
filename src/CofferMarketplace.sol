@@ -1,7 +1,6 @@
 //SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.33;
+pragma solidity 0.8.34;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ICofferBondNft} from "./interfaces/ICofferBondNft.sol";
@@ -11,7 +10,7 @@ import {IWETH} from "./interfaces/IWETH.sol";
 /// @title CofferMarketplace
 /// @author Coffer
 /// @notice Secondary marketplace for Coffer bond NFTs — listings (ETH) and offers (WETH)
-contract CofferMarketplace is Ownable, ReentrancyGuard {
+contract CofferMarketplace is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ───── Errors ─────
@@ -19,7 +18,6 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     error ZeroAddress();
     error ZeroPrice();
     error ZeroAmount();
-    error InsufficientFee();
     error NotSeller();
     error NotBuyer();
     error NotOwner();
@@ -41,11 +39,6 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
 
     // ───── Structs ─────
 
-    struct FunctionFee {
-        uint128 fixedFee;
-        uint16 percentageBps;
-    }
-
     struct Listing {
         address seller;
         uint128 price;
@@ -65,30 +58,12 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     /// @notice Immutable CofferBondNft contract address
     address public immutable I_COFFER_BOND_NFT;
 
-    /// @notice Address that receives collected fees
-    address public sFeeRecipient;
-    /// @notice Fee configuration for each function selector
-    mapping(bytes4 => FunctionFee) public sFunctionFees;
-
     /// @notice Active listings indexed by bond ID
     mapping(uint256 bondId => Listing) public sListings;
     /// @notice Active offers indexed by bond ID and buyer
     mapping(uint256 bondId => mapping(address buyer => Offer)) public sOffers;
 
     // ───── Events ─────
-
-    /// @notice Emitted when the fee recipient is updated
-    /// @param recipient The new fee recipient address
-    event FeeRecipientSet(address indexed recipient);
-    /// @notice Emitted when a function fee is configured
-    /// @param selector The function selector the fee applies to
-    /// @param fixedFee The fixed fee amount in wei
-    /// @param percentageBps The percentage fee in basis points
-    event FunctionFeeSet(bytes4 indexed selector, uint128 indexed fixedFee, uint16 indexed percentageBps);
-    /// @notice Emitted when a fee is collected and sent to the fee recipient
-    /// @param selector The function selector the fee was collected for
-    /// @param fee The fee amount collected
-    event FeeCollected(bytes4 indexed selector, uint256 indexed fee);
 
     /// @notice Emitted when a bond NFT is listed for sale
     /// @param bondId The bond token ID
@@ -126,32 +101,11 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
 
     // ───── Constructor ─────
 
-    constructor(address _owner, address _feeRecipient, address _weth, address _cofferBondNft) Ownable(_owner) {
-        require(_feeRecipient != address(0), ZeroAddress());
+    constructor(address _weth, address _cofferBondNft) {
         require(_weth != address(0), ZeroAddress());
         require(_cofferBondNft != address(0), ZeroAddress());
-        sFeeRecipient = _feeRecipient;
         I_WETH = _weth;
         I_COFFER_BOND_NFT = _cofferBondNft;
-    }
-
-    // ───── Admin ─────
-
-    /// @notice Update the fee recipient address
-    /// @param _recipient The new fee recipient address
-    function setFeeRecipient(address _recipient) external onlyOwner {
-        require(_recipient != address(0), ZeroAddress());
-        sFeeRecipient = _recipient;
-        emit FeeRecipientSet(_recipient);
-    }
-
-    /// @notice Configure the fee for a specific function selector
-    /// @param _selector The function selector to configure
-    /// @param _fixedFee The fixed fee amount in wei
-    /// @param _percentageBps The percentage fee in basis points
-    function setFunctionFee(bytes4 _selector, uint128 _fixedFee, uint16 _percentageBps) external onlyOwner {
-        sFunctionFees[_selector] = FunctionFee({fixedFee: _fixedFee, percentageBps: _percentageBps});
-        emit FunctionFeeSet(_selector, _fixedFee, _percentageBps);
     }
 
     // ───── Listing Functions ─────
@@ -160,9 +114,7 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     /// @param _bondId The bond token ID to list
     /// @param _price The listing price in wei
     /// @param _expiration The listing expiration timestamp
-    function list(uint256 _bondId, uint128 _price, uint64 _expiration) external payable {
-        uint256 remaining = _collectFee(this.list.selector, msg.value);
-        require(remaining == 0, InsufficientPayment());
+    function list(uint256 _bondId, uint128 _price, uint64 _expiration) external {
         _list(msg.sender, _bondId, _price, _expiration);
     }
 
@@ -185,9 +137,7 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     /// @param _bondId The bond token ID to make an offer on
     /// @param _wethAmount The WETH amount to offer
     /// @param _expiration The offer expiration timestamp
-    function makeOffer(uint256 _bondId, uint128 _wethAmount, uint64 _expiration) external payable {
-        uint256 remaining = _collectFee(this.makeOffer.selector, msg.value);
-        require(remaining == 0, InsufficientPayment());
+    function makeOffer(uint256 _bondId, uint128 _wethAmount, uint64 _expiration) external {
         _makeOffer(msg.sender, _bondId, _wethAmount, _expiration);
     }
 
@@ -201,8 +151,8 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     /// @param _bondId The bond token ID
     /// @param _buyer The address of the offer maker
     /// @param _expectedAmount The expected WETH amount to prevent front-running
-    function acceptOffer(uint256 _bondId, address _buyer, uint128 _expectedAmount) external payable nonReentrant {
-        _acceptOffer(msg.sender, _bondId, _buyer, _expectedAmount, msg.value);
+    function acceptOffer(uint256 _bondId, address _buyer, uint128 _expectedAmount) external nonReentrant {
+        _acceptOffer(msg.sender, _bondId, _buyer, _expectedAmount);
     }
 
     // ───── Batch Functions ─────
@@ -213,20 +163,12 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
     /// @param _expirations The listing expiration timestamps
     function batchList(uint256[] calldata _bondIds, uint128[] calldata _prices, uint64[] calldata _expirations)
         external
-        payable
         nonReentrant
     {
         uint256 len = _bondIds.length;
         require(len == _prices.length && len == _expirations.length, ArrayLengthMismatch());
 
-        uint256 totalRemaining = msg.value;
         for (uint256 i; i < len; ++i) {
-            FunctionFee memory ff = sFunctionFees[this.list.selector];
-            uint256 feeForThis = _calculateFeeAmount(ff, 0);
-            // solhint-disable-next-line gas-strict-inequalities
-            require(totalRemaining >= feeForThis, InsufficientFee());
-            totalRemaining -= feeForThis;
-            _distributeFee(this.list.selector, feeForThis);
             _list(msg.sender, _bondIds[i], _prices[i], _expirations[i]);
         }
     }
@@ -240,18 +182,16 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
 
         uint256 totalRemaining = msg.value;
         for (uint256 i; i < len; ++i) {
-            uint256 gross = _grossForPrice(this.buy.selector, _expectedPrices[i]);
             // solhint-disable-next-line gas-strict-inequalities
-            require(totalRemaining >= gross, InsufficientPayment());
-            _buy(msg.sender, _bondIds[i], _expectedPrices[i], gross);
-            totalRemaining -= gross;
+            require(totalRemaining >= _expectedPrices[i], InsufficientPayment());
+            _buy(msg.sender, _bondIds[i], _expectedPrices[i], _expectedPrices[i]);
+            totalRemaining -= _expectedPrices[i];
         }
 
         // Refund excess
         if (totalRemaining > 0) {
             // slither-disable-next-line arbitrary-send-eth
-            (bool ok,) = msg.sender.call{value: totalRemaining}("");
-            require(ok, InsufficientPayment());
+            require(_safeTransferETH(msg.sender, totalRemaining), InsufficientPayment());
         }
     }
 
@@ -271,18 +211,11 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         uint256[] calldata _bondIds,
         uint128[] calldata _wethAmounts,
         uint64[] calldata _expirations
-    ) external payable nonReentrant {
+    ) external nonReentrant {
         uint256 len = _bondIds.length;
         require(len == _wethAmounts.length && len == _expirations.length, ArrayLengthMismatch());
 
-        uint256 totalRemaining = msg.value;
         for (uint256 i; i < len; ++i) {
-            FunctionFee memory ff = sFunctionFees[this.makeOffer.selector];
-            uint256 feeForThis = _calculateFeeAmount(ff, 0);
-            // solhint-disable-next-line gas-strict-inequalities
-            require(totalRemaining >= feeForThis, InsufficientFee());
-            totalRemaining -= feeForThis;
-            _distributeFee(this.makeOffer.selector, feeForThis);
             _makeOffer(msg.sender, _bondIds[i], _wethAmounts[i], _expirations[i]);
         }
     }
@@ -303,18 +236,12 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         uint256[] calldata _bondIds,
         address[] calldata _buyers,
         uint128[] calldata _expectedAmounts
-    ) external payable nonReentrant {
+    ) external nonReentrant {
         uint256 len = _bondIds.length;
         require(len == _buyers.length && len == _expectedAmounts.length, ArrayLengthMismatch());
 
-        uint256 totalRemaining = msg.value;
         for (uint256 i; i < len; ++i) {
-            FunctionFee memory ff = sFunctionFees[this.acceptOffer.selector];
-            uint256 acceptFeeEth = _calculateFeeAmount(ff, 0);
-            // solhint-disable-next-line gas-strict-inequalities
-            require(totalRemaining >= acceptFeeEth, InsufficientFee());
-            totalRemaining -= acceptFeeEth;
-            _acceptOffer(msg.sender, _bondIds[i], _buyers[i], _expectedAmounts[i], acceptFeeEth);
+            _acceptOffer(msg.sender, _bondIds[i], _buyers[i], _expectedAmounts[i]);
         }
     }
 
@@ -360,101 +287,6 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         (maturityValue, duration, startTimestamp) = ICoffer(cofferAddress).sHolderConditions(_bondId);
     }
 
-    // ───── Internal: Fee Infrastructure ─────
-
-    /// @notice Calculate fee and remaining value from a total value for a given selector
-    /// @param _selector The function selector to calculate the fee for
-    /// @param _value The total value to split into fee and remaining
-    /// @return fee The calculated fee amount
-    /// @return remaining The remaining value after fee deduction
-    function _calculateFee(bytes4 _selector, uint256 _value) internal view returns (uint256 fee, uint256 remaining) {
-        FunctionFee memory ff = sFunctionFees[_selector];
-
-        if (ff.fixedFee == 0 && ff.percentageBps == 0) {
-            return (0, _value);
-        }
-
-        // solhint-disable-next-line gas-strict-inequalities
-        require(_value >= ff.fixedFee, InsufficientFee());
-
-        uint256 afterFixed = _value - ff.fixedFee;
-        uint256 operationalValue = (afterFixed * 10000) / (10000 + uint256(ff.percentageBps));
-
-        fee = _value - operationalValue;
-        remaining = operationalValue;
-    }
-
-    /// @notice Calculate fee amount only (no remaining), for a known operational amount
-    /// @param _ff The function fee configuration
-    /// @param _operationalValue The operational value to calculate percentage fee on
-    /// @return fee The calculated fee amount
-    function _calculateFeeAmount(FunctionFee memory _ff, uint256 _operationalValue)
-        internal
-        pure
-        returns (uint256 fee)
-    {
-        fee = _ff.fixedFee;
-        if (_ff.percentageBps > 0 && _operationalValue > 0) {
-            fee += (_operationalValue * uint256(_ff.percentageBps)) / 10000;
-        }
-    }
-
-    /// @notice Forward calculation: given a listing price, compute gross ETH needed (price + fees)
-    /// @param _selector The function selector to calculate fees for
-    /// @param _price The listing price
-    /// @return gross The total gross amount including fees
-    function _grossForPrice(bytes4 _selector, uint128 _price) internal view returns (uint256 gross) {
-        FunctionFee memory ff = sFunctionFees[_selector];
-        gross = uint256(ff.fixedFee) + (uint256(_price) * (10000 + uint256(ff.percentageBps)) + 9999) / 10000;
-    }
-
-    /// @notice Calculate WETH fee from a WETH amount for a given selector
-    /// @param _selector The function selector to calculate the fee for
-    /// @param _wethAmount The WETH amount to calculate the fee on
-    /// @return fee The calculated WETH fee amount
-    /// @return sellerProceeds The remaining WETH after fee deduction
-    function _calculateWethFee(bytes4 _selector, uint256 _wethAmount)
-        internal
-        view
-        returns (uint256 fee, uint256 sellerProceeds)
-    {
-        FunctionFee memory ff = sFunctionFees[_selector];
-
-        if (ff.fixedFee == 0 && ff.percentageBps == 0) {
-            return (0, _wethAmount);
-        }
-
-        fee = uint256(ff.fixedFee);
-        if (ff.percentageBps > 0) {
-            fee += (_wethAmount * uint256(ff.percentageBps)) / 10000;
-        }
-
-        require(_wethAmount > fee, InsufficientFee());
-        sellerProceeds = _wethAmount - fee;
-    }
-
-    /// @notice Collect fee from msg.value and send to fee recipient. Returns remaining value.
-    /// @param _selector The function selector to collect the fee for
-    /// @param _value The total value to collect the fee from
-    /// @return remaining The remaining value after fee collection
-    function _collectFee(bytes4 _selector, uint256 _value) internal returns (uint256 remaining) {
-        uint256 fee;
-        (fee, remaining) = _calculateFee(_selector, _value);
-        _distributeFee(_selector, fee);
-    }
-
-    /// @notice Send fee to fee recipient if non-zero
-    /// @param _selector The function selector the fee is associated with
-    /// @param _fee The fee amount to distribute
-    function _distributeFee(bytes4 _selector, uint256 _fee) internal {
-        if (_fee > 0) {
-            // slither-disable-next-line arbitrary-send-eth,calls-loop
-            (bool ok,) = sFeeRecipient.call{value: _fee}("");
-            require(ok, InsufficientFee());
-            emit FeeCollected(_selector, _fee);
-        }
-    }
-
     // ───── Internal: Listing Logic ─────
 
     function _list(address _seller, uint256 _bondId, uint128 _price, uint64 _expiration) internal {
@@ -465,6 +297,12 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         require(_isBondOutstanding(_bondId), BondNotOutstanding());
         // slither-disable-next-line calls-loop
         require(ICofferBondNft(I_COFFER_BOND_NFT).isApprovedForAll(_seller, address(this)), MarketplaceNotApproved());
+
+        // Emit cancellation if overwriting a stale listing from a different seller
+        Listing memory existing = sListings[_bondId];
+        if (existing.seller != address(0) && existing.seller != _seller) {
+            emit ListingCancelled(_bondId, existing.seller);
+        }
 
         // slither-disable-next-line reentrancy-no-eth
         sListings[_bondId] = Listing({seller: _seller, price: _price, expiration: _expiration});
@@ -494,11 +332,8 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
 
         require(listing.price == _expectedPrice, PriceMismatch());
         require(_buyer != listing.seller, CannotBuyOwnListing());
-
-        // Calculate fee from payment
-        (uint256 fee, uint256 remaining) = _calculateFee(this.buy.selector, _payment);
         // solhint-disable-next-line gas-strict-inequalities
-        require(remaining >= listing.price, InsufficientPayment());
+        require(_payment >= listing.price, InsufficientPayment());
 
         // CEI: delete listing before external calls
         // slither-disable-next-line reentrancy-no-eth,costly-loop
@@ -506,27 +341,21 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
 
         // Transfer NFT from seller to buyer (seller approved marketplace in _list)
         // slither-disable-next-line arbitrary-send-erc20,calls-loop
-        ICofferBondNft(I_COFFER_BOND_NFT).transferFrom(listing.seller, _buyer, _bondId);
+        ICofferBondNft(I_COFFER_BOND_NFT).safeTransferFrom(listing.seller, _buyer, _bondId);
 
-        // Send price to seller
+        // Send price to seller — fall back to WETH if seller rejects ETH
         // slither-disable-next-line arbitrary-send-eth,calls-loop
-        (bool okSeller,) = listing.seller.call{value: listing.price}("");
-        require(okSeller, InsufficientPayment());
-
-        // Send fee to fee recipient
-        if (fee > 0) {
-            // slither-disable-next-line arbitrary-send-eth,calls-loop
-            (bool okFee,) = sFeeRecipient.call{value: fee}("");
-            require(okFee, InsufficientPayment());
-            emit FeeCollected(this.buy.selector, fee);
+        bool okSeller = _safeTransferETH(listing.seller, listing.price);
+        if (!okSeller) {
+            IWETH(I_WETH).deposit{value: listing.price}();
+            IERC20(I_WETH).safeTransfer(listing.seller, listing.price);
         }
 
         // Refund any excess to buyer
-        uint256 excess = remaining - listing.price;
+        uint256 excess = _payment - listing.price;
         if (excess > 0) {
             // slither-disable-next-line arbitrary-send-eth,calls-loop
-            (bool okRefund,) = _buyer.call{value: excess}("");
-            require(okRefund, InsufficientPayment());
+            require(_safeTransferETH(_buyer, excess), InsufficientPayment());
         }
 
         emit ListingPurchased(_bondId, _buyer, listing.seller, listing.price);
@@ -559,13 +388,7 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         emit OfferCancelled(_bondId, _caller);
     }
 
-    function _acceptOffer(
-        address _seller,
-        uint256 _bondId,
-        address _buyer,
-        uint128 _expectedAmount,
-        uint256 _ethPayment
-    ) internal {
+    function _acceptOffer(address _seller, uint256 _bondId, address _buyer, uint128 _expectedAmount) internal {
         Offer memory o = sOffers[_bondId][_buyer];
         require(o.buyer != address(0), OfferNotFound());
         // solhint-disable-next-line gas-strict-inequalities
@@ -573,6 +396,9 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         require(_isBondOutstanding(_bondId), BondNotOutstanding());
         // slither-disable-next-line calls-loop
         require(ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) == _seller, NotOwner());
+        require(_buyer != _seller, CannotBuyOwnListing());
+        // slither-disable-next-line calls-loop
+        require(ICofferBondNft(I_COFFER_BOND_NFT).isApprovedForAll(_seller, address(this)), MarketplaceNotApproved());
         require(o.wethAmount == _expectedAmount, AmountMismatch());
         // Verify buyer still has sufficient WETH
         // slither-disable-next-line calls-loop
@@ -581,32 +407,17 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         // slither-disable-next-line calls-loop
         // solhint-disable-next-line gas-strict-inequalities
         require(IWETH(I_WETH).allowance(_buyer, address(this)) >= o.wethAmount, InsufficientWethAllowance());
-        // Calculate WETH fee
-        (uint256 wethFee, uint256 sellerProceeds) = _calculateWethFee(this.acceptOffer.selector, o.wethAmount);
 
         // CEI: delete offer before external calls
         delete sOffers[_bondId][_buyer];
 
-        // Collect optional ETH fee for acceptOffer action itself
-        if (_ethPayment > 0) {
-            _collectFee(this.acceptOffer.selector, _ethPayment);
-        }
-
-        // Pull WETH from buyer (buyer approved marketplace in _makeOffer)
+        // Transfer full WETH from buyer to seller (no fee deduction)
         // slither-disable-next-line arbitrary-send-erc20
-        IERC20(I_WETH).safeTransferFrom(_buyer, address(this), o.wethAmount);
+        IERC20(I_WETH).safeTransferFrom(_buyer, _seller, o.wethAmount);
 
-        // Send WETH fee to fee recipient
-        if (wethFee > 0) {
-            IERC20(I_WETH).safeTransfer(sFeeRecipient, wethFee);
-            emit FeeCollected(this.acceptOffer.selector, wethFee);
-        }
-
-        // Send WETH proceeds to seller
-        IERC20(I_WETH).safeTransfer(_seller, sellerProceeds);
         // Transfer NFT from seller to buyer
         // slither-disable-next-line calls-loop
-        ICofferBondNft(I_COFFER_BOND_NFT).transferFrom(_seller, _buyer, _bondId);
+        ICofferBondNft(I_COFFER_BOND_NFT).safeTransferFrom(_seller, _buyer, _bondId);
 
         emit OfferAccepted(_bondId, _buyer, _seller, o.wethAmount);
     }
@@ -622,5 +433,28 @@ contract CofferMarketplace is Ownable, ReentrancyGuard {
         // slither-disable-next-line unused-return,calls-loop
         (uint128 maturityValue,,) = ICoffer(cofferAddr).sHolderConditions(_bondId);
         return maturityValue != 0;
+    }
+
+    /// @notice Transfer ETH without copying returndata, preventing returndata bomb gas griefing.
+    /// @dev Solidity's `addr.call{value: amount}("")` copies ALL returndata into memory.
+    ///      A malicious recipient can exploit this by returning a large payload (e.g., 300KB)
+    ///      from their receive/fallback function, causing quadratic memory expansion gas costs
+    ///      charged to the caller. Using assembly with returndatasize 0 (the last two zeros in
+    ///      the call opcode: `call(gas, to, amount, 0, 0, 0, 0)`) tells the EVM to skip the
+    ///      returndata copy entirely, making the gas cost constant regardless of what the
+    ///      recipient returns.
+    /// @param _to The address to transfer ETH to
+    /// @param _amount The amount of ETH to transfer in wei
+    /// @return success Whether the transfer succeeded
+    // slither-disable-next-line assembly
+    function _safeTransferETH(address _to, uint256 _amount) internal returns (bool success) {
+        // solhint-disable-next-line no-inline-assembly
+        assembly {
+            // call(gasLimit, to, value, inputOffset, inputSize, outputOffset, outputSize)
+            // The final two zeros (outputOffset=0, outputSize=0) are critical:
+            // they prevent the EVM from copying any returndata into memory,
+            // which is what makes this immune to returndata bomb attacks.
+            success := call(gas(), _to, _amount, 0, 0, 0, 0)
+        }
     }
 }

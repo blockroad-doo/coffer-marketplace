@@ -1,5 +1,5 @@
 //SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.33;
+pragma solidity 0.8.34;
 
 /// @title ICofferBondNft
 /// @author Coffer
@@ -29,6 +29,12 @@ interface ICofferBondNft {
     /// @param to The new owner
     /// @param tokenId The bond token ID
     function transferFrom(address from, address to, uint256 tokenId) external;
+
+    /// @notice Safely transfer a bond NFT, checking receiver support
+    /// @param from The current owner
+    /// @param to The new owner
+    /// @param tokenId The bond token ID
+    function safeTransferFrom(address from, address to, uint256 tokenId) external;
 
     /// @notice Set or revoke approval for an operator to manage all tokens
     /// @param operator The operator address

@@ -2,7 +2,9 @@
 
 A secondary marketplace for trading [Coffer Bond NFTs](#what-is-a-coffer-bond-nft). Two trading mechanisms are supported: **ETH listings** (seller sets a price, buyer pays ETH) and **WETH offers** (buyer deposits an offer in WETH, seller accepts).
 
-Built with Solidity ^0.8.33, [Foundry](https://book.getfoundry.sh/), and OpenZeppelin (`Ownable`, `ReentrancyGuard`, `SafeERC20`).
+Built with Solidity ^0.8.33, [Foundry](https://book.getfoundry.sh/), and OpenZeppelin (`ReentrancyGuard`, `SafeERC20`).
+
+> **Trustless design** — the contract has no owner, no admin functions, and no fee system. All payments go directly between buyers and sellers with zero intermediary extraction.
 
 ---
 
@@ -23,25 +25,21 @@ A bond is considered **outstanding** while its `bondMaturityValue != 0`. The mar
 ### Listings (ETH)
 
 1. Seller approves the marketplace and calls `list()` with a price and expiration.
-2. Buyer calls `buy()` with ETH covering the price plus fees.
+2. Buyer calls `buy()` with ETH covering the price.
 3. The NFT transfers from seller to buyer; ETH goes to the seller.
 
 ### Offers (WETH)
 
 1. Buyer approves WETH spending, then calls `makeOffer()` with a WETH amount and expiration.
 2. Seller approves the marketplace and calls `acceptOffer()`.
-3. WETH is pulled from the buyer and sent to the seller (minus fees); the NFT transfers to the buyer.
+3. WETH is pulled from the buyer and sent to the seller; the NFT transfers to the buyer.
 
 ### Safety Mechanisms
 
 - **Front-running protection** — `buy()` takes `_expectedPrice` and `acceptOffer()` takes `_expectedAmount`. The transaction reverts if the on-chain value differs.
 - **CEI pattern** — state is deleted before any external calls.
-- **ReentrancyGuard** — applied to `buy`, `acceptOffer`, and all batch functions.
+- **ReentrancyGuard** — applied to all functions that perform external calls (`buy`, `acceptOffer`, `batchList`, `batchBuy`, `batchMakeOffers`, `batchAcceptOffers`).
 - **Bond outstanding check** — every trade verifies the bond's maturity value is non-zero.
-
-### Fee System
-
-Each function can have a configurable fee consisting of a **fixed fee** (wei) and a **percentage fee** (basis points). See [Fee System](#fee-system-1) for details.
 
 ---
 
@@ -76,37 +74,15 @@ slither .
 
 ## Deployment
 
-### Step 1 — Deploy the marketplace
-
 Set environment variables, then run the deploy script:
 
 ```bash
-export MARKETPLACE_OWNER=0x...
-export FEE_RECIPIENT=0x...
 export WETH_ADDRESS=0x...
 export BOND_NFT_ADDRESS=0x...
 
 forge script script/DeployCofferMarketplace.s.sol \
   --rpc-url <RPC_URL> --broadcast --verify
 ```
-
-### Step 2 — Configure fees
-
-```bash
-export MARKETPLACE_ADDRESS=0x...   # output from Step 1
-
-forge script script/ConfigureFees.s.sol \
-  --rpc-url <RPC_URL> --broadcast
-```
-
-Default fee configuration applied by `ConfigureFees.s.sol`:
-
-| Function | Fixed Fee | Percentage Fee |
-|---|---|---|
-| `list` | 0.001 ETH | 0% |
-| `buy` | 0.001 ETH | 1% (100 bps) |
-| `makeOffer` | 0.001 ETH | 0% |
-| `acceptOffer` | 0 | 1% WETH (100 bps) |
 
 ---
 
@@ -116,17 +92,17 @@ Default fee configuration applied by `ConfigureFees.s.sol`:
 
 ```
 1. Seller: cofferBondNft.setApprovalForAll(marketplace, true)
-2. Seller: marketplace.list(bondId, price, expiration)        // + ETH fee
-3. Buyer:  marketplace.buy(bondId, expectedPrice)             // + ETH (price + fees)
+2. Seller: marketplace.list(bondId, price, expiration)
+3. Buyer:  marketplace.buy(bondId, expectedPrice)             {value: price}
 ```
 
 ### Selling via Offer
 
 ```
 1. Buyer:  weth.approve(marketplace, amount)
-2. Buyer:  marketplace.makeOffer(bondId, wethAmount, expiration)  // + ETH fee
+2. Buyer:  marketplace.makeOffer(bondId, wethAmount, expiration)
 3. Seller: cofferBondNft.setApprovalForAll(marketplace, true)
-4. Seller: marketplace.acceptOffer(bondId, buyer, expectedAmount) // + optional ETH fee
+4. Seller: marketplace.acceptOffer(bondId, buyer, expectedAmount)
 ```
 
 ### Cancelling
@@ -153,21 +129,14 @@ All single operations have batch counterparts for gas-efficient multi-bond trans
 
 ## Function Reference
 
-### Admin (owner only)
-
-| Function | Parameters | Description | Payable | Event |
-|---|---|---|---|---|
-| `setFeeRecipient` | `address _recipient` | Update fee recipient | No | `FeeRecipientSet` |
-| `setFunctionFee` | `bytes4 _selector, uint128 _fixedFee, uint16 _percentageBps` | Set fee config per function selector | No | `FunctionFeeSet` |
-
 ### Listings
 
 | Function | Parameters | Modifiers | Description | Payable | Event |
 |---|---|---|---|---|---|
-| `list` | `uint256 _bondId, uint128 _price, uint64 _expiration` | — | Create listing | Yes | `Listed` |
+| `list` | `uint256 _bondId, uint128 _price, uint64 _expiration` | — | Create listing | No | `Listed` |
 | `cancelListing` | `uint256 _bondId` | — | Cancel own listing | No | `ListingCancelled` |
 | `buy` | `uint256 _bondId, uint128 _expectedPrice` | `nonReentrant` | Purchase listed bond | Yes | `ListingPurchased` |
-| `batchList` | `uint256[] _bondIds, uint128[] _prices, uint64[] _expirations` | `nonReentrant` | Batch list | Yes | `Listed` (per bond) |
+| `batchList` | `uint256[] _bondIds, uint128[] _prices, uint64[] _expirations` | `nonReentrant` | Batch list | No | `Listed` (per bond) |
 | `batchCancelListings` | `uint256[] _bondIds` | — | Batch cancel | No | `ListingCancelled` (per bond) |
 | `batchBuy` | `uint256[] _bondIds, uint128[] _expectedPrices` | `nonReentrant` | Batch buy | Yes | `ListingPurchased` (per bond) |
 
@@ -175,12 +144,12 @@ All single operations have batch counterparts for gas-efficient multi-bond trans
 
 | Function | Parameters | Modifiers | Description | Payable | Event |
 |---|---|---|---|---|---|
-| `makeOffer` | `uint256 _bondId, uint128 _wethAmount, uint64 _expiration` | — | Make WETH offer | Yes | `OfferMade` |
+| `makeOffer` | `uint256 _bondId, uint128 _wethAmount, uint64 _expiration` | — | Make WETH offer | No | `OfferMade` |
 | `cancelOffer` | `uint256 _bondId` | — | Cancel own offer | No | `OfferCancelled` |
-| `acceptOffer` | `uint256 _bondId, address _buyer, uint128 _expectedAmount` | `nonReentrant` | Accept WETH offer | Yes | `OfferAccepted` |
-| `batchMakeOffers` | `uint256[] _bondIds, uint128[] _wethAmounts, uint64[] _expirations` | `nonReentrant` | Batch offers | Yes | `OfferMade` (per bond) |
+| `acceptOffer` | `uint256 _bondId, address _buyer, uint128 _expectedAmount` | `nonReentrant` | Accept WETH offer | No | `OfferAccepted` |
+| `batchMakeOffers` | `uint256[] _bondIds, uint128[] _wethAmounts, uint64[] _expirations` | `nonReentrant` | Batch offers | No | `OfferMade` (per bond) |
 | `batchCancelOffers` | `uint256[] _bondIds` | — | Batch cancel | No | `OfferCancelled` (per bond) |
-| `batchAcceptOffers` | `uint256[] _bondIds, address[] _buyers, uint128[] _expectedAmounts` | `nonReentrant` | Batch accept | Yes | `OfferAccepted` (per bond) |
+| `batchAcceptOffers` | `uint256[] _bondIds, address[] _buyers, uint128[] _expectedAmounts` | `nonReentrant` | Batch accept | No | `OfferAccepted` (per bond) |
 
 ### Views
 
@@ -192,38 +161,10 @@ All single operations have batch counterparts for gas-efficient multi-bond trans
 
 ---
 
-## Fee System
-
-Each function selector maps to an optional `FunctionFee`:
-
-```solidity
-struct FunctionFee {
-    uint128 fixedFee;      // flat fee in wei
-    uint16  percentageBps; // percentage in basis points (1% = 100)
-}
-```
-
-**ETH functions** (`list`, `buy`, `makeOffer`): fees are deducted from `msg.value`.
-
-- For `buy`, the fee is calculated on the total payment: `fee = fixedFee + percentageFee`, `remaining = msg.value - fee`, and `remaining` must cover the listing price.
-- For `list` and `makeOffer`, only the fixed fee applies (percentage is on the operational value, which is 0 for these).
-
-**WETH functions** (`acceptOffer`): a percentage fee is deducted from the WETH amount.
-
-- Formula: `fee = fixedFee + (wethAmount * percentageBps / 10000)`
-- The seller receives `wethAmount - fee`.
-
-Fees are sent to `sFeeRecipient`. A `FeeCollected` event is emitted for every non-zero fee.
-
----
-
 ## Events
 
 | Event | Parameters | Description |
 |---|---|---|
-| `FeeRecipientSet` | `address indexed recipient` | Fee recipient updated |
-| `FunctionFeeSet` | `bytes4 indexed selector, uint128 indexed fixedFee, uint16 indexed percentageBps` | Per-function fee configured |
-| `FeeCollected` | `bytes4 indexed selector, uint256 indexed fee` | Fee collected and sent to recipient |
 | `Listed` | `uint256 indexed bondId, address indexed seller, uint128 indexed price, uint64 expiration` | Bond listed for sale |
 | `ListingCancelled` | `uint256 indexed bondId, address indexed seller` | Listing cancelled |
 | `ListingPurchased` | `uint256 indexed bondId, address indexed buyer, address indexed seller, uint128 price` | Listed bond purchased |
@@ -240,7 +181,6 @@ Fees are sent to `sFeeRecipient`. A `FeeCollected` event is emitted for every no
 | `ZeroAddress()` | Address parameter is the zero address |
 | `ZeroPrice()` | Listing price must be greater than zero |
 | `ZeroAmount()` | WETH offer amount must be greater than zero |
-| `InsufficientFee()` | Payment does not cover the required fee |
 | `NotSeller()` | Caller is not the listing seller |
 | `NotBuyer()` | Caller is not the offer maker |
 | `NotOwner()` | Caller does not own the bond NFT |
@@ -257,12 +197,22 @@ Fees are sent to `sFeeRecipient`. A `FeeCollected` event is emitted for every no
 | `CannotBuyOwnListing()` | Buyer cannot purchase their own listing |
 | `InsufficientWethBalance()` | Buyer does not have enough WETH |
 | `InsufficientWethAllowance()` | Buyer has not approved enough WETH for the marketplace |
-| `InsufficientPayment()` | ETH sent does not cover the price plus fees |
+| `InsufficientPayment()` | ETH sent does not cover the listing price |
 | `ArrayLengthMismatch()` | Batch function input arrays have different lengths |
 
 ---
 
 ## Architecture
+
+![Architecture](assets/architecture.svg)
+
+<details>
+<summary>Editing the diagram</summary>
+
+The canonical source is `assets/architecture.excalidraw`.
+Open it at [excalidraw.com](https://excalidraw.com), edit, then **Export → SVG** to `assets/architecture.svg`.
+Commit both files.
+</details>
 
 ### Immutables
 
@@ -275,8 +225,6 @@ Fees are sent to `sFeeRecipient`. A `FeeCollected` event is emitted for every no
 
 | Variable | Type | Description |
 |---|---|---|
-| `sFeeRecipient` | `address` | Receives all collected fees |
-| `sFunctionFees` | `mapping(bytes4 => FunctionFee)` | Per-function fee configuration |
 | `sListings` | `mapping(uint256 => Listing)` | Active listings by bond ID |
 | `sOffers` | `mapping(uint256 => mapping(address => Offer))` | Active offers by bond ID and buyer |
 

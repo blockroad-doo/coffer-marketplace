@@ -1,10 +1,16 @@
 //SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.33;
+pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
 
 // ───── Mock Contracts ─────
+
+interface IERC721Receiver {
+    function onERC721Received(address operator, address from, uint256 tokenId, bytes calldata data)
+        external
+        returns (bytes4);
+}
 
 /// @dev Minimal ERC721 mock with cofferOf support
 contract MockBondNft {
@@ -30,10 +36,21 @@ contract MockBondNft {
         return _coffers[tokenId];
     }
 
-    function transferFrom(address from, address to, uint256 tokenId) external {
+    function transferFrom(address from, address to, uint256 tokenId) public {
         require(_owners[tokenId] == from, "ERC721: not owner");
         require(msg.sender == from || _operatorApprovals[from][msg.sender], "ERC721: not approved");
         _owners[tokenId] = to;
+    }
+
+    function safeTransferFrom(address from, address to, uint256 tokenId) external {
+        transferFrom(from, to, tokenId);
+        if (to.code.length > 0) {
+            require(
+                IERC721Receiver(to).onERC721Received(msg.sender, from, tokenId, "")
+                    == IERC721Receiver.onERC721Received.selector,
+                "ERC721: unsafe recipient"
+            );
+        }
     }
 
     function setApprovalForAll(address operator, bool approved) external {
@@ -77,6 +94,10 @@ contract MockWETH {
         balanceOf[to] += amount;
     }
 
+    function deposit() external payable {
+        balanceOf[msg.sender] += msg.value;
+    }
+
     function approve(address spender, uint256 amount) external returns (bool) {
         allowance[msg.sender][spender] = amount;
         return true;
@@ -99,8 +120,8 @@ contract MockWETH {
     }
 }
 
-/// @dev Contract with no receive/fallback — rejects all ETH transfers
-contract EthRejecter {
+/// @dev Contract that accepts NFTs but rejects all ETH transfers
+contract EthRejecter is IERC721Receiver {
     function approveNft(address nft, address operator) external {
         MockBondNft(nft).setApprovalForAll(operator, true);
     }
@@ -116,16 +137,9 @@ contract EthRejecter {
     function doBatchBuy(address mp, uint256[] calldata ids, uint128[] calldata prices) external payable {
         CofferMarketplace(mp).batchBuy{value: msg.value}(ids, prices);
     }
-}
 
-/// @dev Harness to expose internal _calculateFeeAmount for direct testing
-contract CofferMarketplaceHarness is CofferMarketplace {
-    constructor(address _owner, address _feeRecipient, address _weth, address _cofferBondNft)
-        CofferMarketplace(_owner, _feeRecipient, _weth, _cofferBondNft)
-    {}
-
-    function exposedCalculateFeeAmount(FunctionFee memory ff, uint256 opVal) external pure returns (uint256) {
-        return _calculateFeeAmount(ff, opVal);
+    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
+        return IERC721Receiver.onERC721Received.selector;
     }
 }
 
@@ -137,8 +151,6 @@ contract CofferMarketplaceTest is Test {
     MockCoffer public coffer;
     MockWETH public weth;
 
-    address public owner = makeAddr("owner");
-    address public feeRecipient = makeAddr("feeRecipient");
     address public seller = makeAddr("seller");
     address public buyer = makeAddr("buyer");
     address public buyer2 = makeAddr("buyer2");
@@ -151,7 +163,7 @@ contract CofferMarketplaceTest is Test {
         bondNft = new MockBondNft();
         weth = new MockWETH();
 
-        marketplace = new CofferMarketplace(owner, feeRecipient, address(weth), address(bondNft));
+        marketplace = new CofferMarketplace(address(weth), address(bondNft));
 
         // Mint a bond NFT to seller
         bondId = bondNft.mintTo(seller, address(coffer));
@@ -187,11 +199,6 @@ contract CofferMarketplaceTest is Test {
         marketplace.makeOffer(bondId, amount, uint64(block.timestamp + 1 days));
     }
 
-    function _setFee(bytes4 sel, uint128 fixedFee, uint16 bps) internal {
-        vm.prank(owner);
-        marketplace.setFunctionFee(sel, fixedFee, bps);
-    }
-
     function _mintBondTo(address to) internal returns (uint256) {
         return bondNft.mintTo(to, address(coffer));
     }
@@ -199,54 +206,18 @@ contract CofferMarketplaceTest is Test {
     // ───── Constructor ─────
 
     function test_constructor() public view {
-        assertEq(marketplace.owner(), owner);
-        assertEq(marketplace.sFeeRecipient(), feeRecipient);
         assertEq(marketplace.I_WETH(), address(weth));
         assertEq(marketplace.I_COFFER_BOND_NFT(), address(bondNft));
     }
 
-    function test_constructor_revert_zeroFeeRecipient() public {
-        vm.expectRevert(CofferMarketplace.ZeroAddress.selector);
-        new CofferMarketplace(owner, address(0), address(weth), address(bondNft));
-    }
-
     function test_constructor_revert_zeroWeth() public {
         vm.expectRevert(CofferMarketplace.ZeroAddress.selector);
-        new CofferMarketplace(owner, feeRecipient, address(0), address(bondNft));
+        new CofferMarketplace(address(0), address(bondNft));
     }
 
     function test_constructor_revert_zeroBondNft() public {
         vm.expectRevert(CofferMarketplace.ZeroAddress.selector);
-        new CofferMarketplace(owner, feeRecipient, address(weth), address(0));
-    }
-
-    // ───── Admin ─────
-
-    function test_setFeeRecipient() public {
-        address newRecipient = makeAddr("newRecipient");
-        vm.prank(owner);
-        marketplace.setFeeRecipient(newRecipient);
-        assertEq(marketplace.sFeeRecipient(), newRecipient);
-    }
-
-    function test_setFeeRecipient_revert_notOwner() public {
-        vm.prank(seller);
-        vm.expectRevert();
-        marketplace.setFeeRecipient(makeAddr("x"));
-    }
-
-    function test_setFeeRecipient_revert_zeroAddress() public {
-        vm.prank(owner);
-        vm.expectRevert(CofferMarketplace.ZeroAddress.selector);
-        marketplace.setFeeRecipient(address(0));
-    }
-
-    function test_setFunctionFee() public {
-        vm.prank(owner);
-        marketplace.setFunctionFee(CofferMarketplace.buy.selector, 0.001 ether, 100);
-        (uint128 fixedFee, uint16 bps) = marketplace.sFunctionFees(CofferMarketplace.buy.selector);
-        assertEq(fixedFee, 0.001 ether);
-        assertEq(bps, 100);
+        new CofferMarketplace(address(weth), address(0));
     }
 
     // ───── Listing CRUD ─────
@@ -297,6 +268,30 @@ contract CofferMarketplaceTest is Test {
         marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
     }
 
+    function test_list_emitsListingCancelledOnStaleOverwrite() public {
+        // Seller lists bond
+        _listBond(1 ether);
+
+        // Seller transfers bond outside marketplace
+        vm.prank(seller);
+        bondNft.transferFrom(seller, buyer2, bondId);
+
+        // New owner approves and re-lists — should emit ListingCancelled for old seller
+        vm.prank(buyer2);
+        bondNft.setApprovalForAll(address(marketplace), true);
+
+        vm.expectEmit(true, true, false, false);
+        emit CofferMarketplace.ListingCancelled(bondId, seller);
+
+        vm.prank(buyer2);
+        marketplace.list(bondId, 2 ether, uint64(block.timestamp + 1 days));
+
+        // New listing belongs to buyer2
+        (address s, uint128 p,) = marketplace.sListings(bondId);
+        assertEq(s, buyer2);
+        assertEq(p, 2 ether);
+    }
+
     function test_cancelListing() public {
         vm.prank(seller);
         marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
@@ -319,7 +314,7 @@ contract CofferMarketplaceTest is Test {
 
     // ───── Buy Flow ─────
 
-    function test_buy_zeroFee() public {
+    function test_buy() public {
         uint128 price = 1 ether;
         vm.prank(seller);
         marketplace.list(bondId, price, uint64(block.timestamp + 1 days));
@@ -331,65 +326,6 @@ contract CofferMarketplaceTest is Test {
 
         assertEq(bondNft.ownerOf(bondId), buyer);
         assertEq(seller.balance - sellerBefore, price);
-    }
-
-    function test_buy_fixedFeeOnly() public {
-        vm.prank(owner);
-        marketplace.setFunctionFee(CofferMarketplace.buy.selector, 0.01 ether, 0);
-
-        uint128 price = 1 ether;
-        vm.prank(seller);
-        marketplace.list(bondId, price, uint64(block.timestamp + 1 days));
-
-        uint256 sellerBefore = seller.balance;
-        uint256 feeRecipientBefore = feeRecipient.balance;
-
-        vm.prank(buyer);
-        marketplace.buy{value: 1.01 ether}(bondId, price);
-
-        assertEq(bondNft.ownerOf(bondId), buyer);
-        assertEq(seller.balance - sellerBefore, price);
-        assertEq(feeRecipient.balance - feeRecipientBefore, 0.01 ether);
-    }
-
-    function test_buy_percentageFeeOnly() public {
-        vm.prank(owner);
-        marketplace.setFunctionFee(CofferMarketplace.buy.selector, 0, 100); // 1%
-
-        uint128 price = 1 ether;
-        vm.prank(seller);
-        marketplace.list(bondId, price, uint64(block.timestamp + 1 days));
-
-        // gross = price * (10000 + 100) / 10000 = 1.01 ether
-        uint256 sellerBefore = seller.balance;
-        uint256 feeRecipientBefore = feeRecipient.balance;
-
-        vm.prank(buyer);
-        marketplace.buy{value: 1.01 ether}(bondId, price);
-
-        assertEq(bondNft.ownerOf(bondId), buyer);
-        assertEq(seller.balance - sellerBefore, price);
-        assertEq(feeRecipient.balance - feeRecipientBefore, 0.01 ether);
-    }
-
-    function test_buy_fixedAndPercentageFee() public {
-        vm.prank(owner);
-        marketplace.setFunctionFee(CofferMarketplace.buy.selector, 0.001 ether, 100); // 0.001 ETH + 1%
-
-        uint128 price = 1 ether;
-        vm.prank(seller);
-        marketplace.list(bondId, price, uint64(block.timestamp + 1 days));
-
-        // gross = 0.001 + 1.0 * 10100 / 10000 = 0.001 + 1.01 = 1.011
-        uint256 sellerBefore = seller.balance;
-        uint256 feeRecipientBefore = feeRecipient.balance;
-
-        vm.prank(buyer);
-        marketplace.buy{value: 1.011 ether}(bondId, price);
-
-        assertEq(bondNft.ownerOf(bondId), buyer);
-        assertEq(seller.balance - sellerBefore, price);
-        assertEq(feeRecipient.balance - feeRecipientBefore, 0.011 ether);
     }
 
     function test_buy_withExcessRefund() public {
@@ -467,6 +403,40 @@ contract CofferMarketplaceTest is Test {
         marketplace.buy{value: 1 ether}(bondId, 1 ether);
     }
 
+    function test_buy_revert_insufficientPayment() public {
+        _listBond(1 ether);
+        vm.prank(buyer);
+        vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
+        marketplace.buy{value: 0.5 ether}(bondId, 1 ether);
+    }
+
+    function test_buy_sellerRejectsEth_fallsBackToWeth() public {
+        EthRejecter rejecter = new EthRejecter();
+        uint256 rejBondId = _mintBondTo(address(rejecter));
+        rejecter.approveNft(address(bondNft), address(marketplace));
+        rejecter.doList(address(marketplace), rejBondId, 1 ether, uint64(block.timestamp + 1 days));
+
+        vm.prank(buyer);
+        marketplace.buy{value: 1 ether}(rejBondId, 1 ether);
+
+        // NFT transferred to buyer
+        assertEq(bondNft.ownerOf(rejBondId), buyer);
+        // Seller received WETH instead of ETH
+        assertEq(weth.balanceOf(address(rejecter)), 1 ether);
+        // Listing deleted
+        (address s,,) = marketplace.sListings(rejBondId);
+        assertEq(s, address(0));
+    }
+
+    function test_buy_revert_buyerRefundFails() public {
+        EthRejecter rejecter = new EthRejecter();
+        _listBond(1 ether);
+        vm.deal(address(this), 2 ether);
+
+        vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
+        rejecter.doBuy{value: 2 ether}(address(marketplace), bondId, 1 ether);
+    }
+
     // ───── Offer CRUD ─────
 
     function test_makeOffer() public {
@@ -513,6 +483,12 @@ contract CofferMarketplaceTest is Test {
         marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
     }
 
+    function test_makeOffer_revert_expirationNotInFuture() public {
+        vm.prank(buyer);
+        vm.expectRevert(CofferMarketplace.ExpirationNotInFuture.selector);
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp - 1));
+    }
+
     function test_cancelOffer() public {
         vm.prank(buyer);
         marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
@@ -535,7 +511,7 @@ contract CofferMarketplaceTest is Test {
 
     // ───── Accept Offer Flow ─────
 
-    function test_acceptOffer_zeroFee() public {
+    function test_acceptOffer() public {
         uint128 offerAmount = 1 ether;
         vm.prank(buyer);
         marketplace.makeOffer(bondId, offerAmount, uint64(block.timestamp + 1 days));
@@ -547,26 +523,6 @@ contract CofferMarketplaceTest is Test {
 
         assertEq(bondNft.ownerOf(bondId), buyer);
         assertEq(weth.balanceOf(seller) - sellerWethBefore, offerAmount);
-    }
-
-    function test_acceptOffer_withWethFee() public {
-        vm.prank(owner);
-        marketplace.setFunctionFee(CofferMarketplace.acceptOffer.selector, 0, 100); // 1%
-
-        uint128 offerAmount = 10 ether;
-        vm.prank(buyer);
-        marketplace.makeOffer(bondId, offerAmount, uint64(block.timestamp + 1 days));
-
-        uint256 sellerWethBefore = weth.balanceOf(seller);
-        uint256 feeRecipientWethBefore = weth.balanceOf(feeRecipient);
-
-        vm.prank(seller);
-        marketplace.acceptOffer(bondId, buyer, offerAmount);
-
-        assertEq(bondNft.ownerOf(bondId), buyer);
-        // 1% fee = 0.1 ether
-        assertEq(weth.balanceOf(feeRecipient) - feeRecipientWethBefore, 0.1 ether);
-        assertEq(weth.balanceOf(seller) - sellerWethBefore, 9.9 ether);
     }
 
     function test_acceptOffer_revert_offerNotFound() public {
@@ -596,6 +552,35 @@ contract CofferMarketplaceTest is Test {
         marketplace.acceptOffer(bondId, buyer, 1 ether);
     }
 
+    function test_acceptOffer_revert_cannotBuyOwnListing() public {
+        // Seller makes offer on own bond
+        weth.mint(seller, 10 ether);
+        vm.prank(seller);
+        weth.approve(address(marketplace), type(uint256).max);
+        vm.prank(seller);
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
+
+        // Seller tries to accept own offer
+        vm.prank(seller);
+        vm.expectRevert(CofferMarketplace.CannotBuyOwnListing.selector);
+        marketplace.acceptOffer(bondId, seller, 1 ether);
+    }
+
+    function test_acceptOffer_revert_notApproved() public {
+        // Create a new seller without marketplace approval
+        address seller2 = makeAddr("seller2");
+        uint256 bondId2 = bondNft.mintTo(seller2, address(coffer));
+
+        // Buyer makes offer on seller2's bond
+        vm.prank(buyer);
+        marketplace.makeOffer(bondId2, 1 ether, uint64(block.timestamp + 1 days));
+
+        // Seller2 tries to accept without approving marketplace
+        vm.prank(seller2);
+        vm.expectRevert(CofferMarketplace.MarketplaceNotApproved.selector);
+        marketplace.acceptOffer(bondId2, buyer, 1 ether);
+    }
+
     function test_acceptOffer_revert_amountMismatch() public {
         vm.prank(buyer);
         marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
@@ -603,6 +588,37 @@ contract CofferMarketplaceTest is Test {
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.AmountMismatch.selector);
         marketplace.acceptOffer(bondId, buyer, 2 ether);
+    }
+
+    function test_acceptOffer_revert_bondNotOutstanding() public {
+        _makeOfferFrom(buyer, 1 ether);
+        coffer.setMaturityValue(0);
+
+        vm.prank(seller);
+        vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
+        marketplace.acceptOffer(bondId, buyer, 1 ether);
+    }
+
+    function test_acceptOffer_revert_buyerWethDrained() public {
+        _makeOfferFrom(buyer, 1 ether);
+
+        vm.prank(buyer);
+        require(weth.transfer(address(1), 100 ether), "transfer failed");
+
+        vm.prank(seller);
+        vm.expectRevert(CofferMarketplace.InsufficientWethBalance.selector);
+        marketplace.acceptOffer(bondId, buyer, 1 ether);
+    }
+
+    function test_acceptOffer_revert_buyerAllowanceRevoked() public {
+        _makeOfferFrom(buyer, 1 ether);
+
+        vm.prank(buyer);
+        weth.approve(address(marketplace), 0);
+
+        vm.prank(seller);
+        vm.expectRevert(CofferMarketplace.InsufficientWethAllowance.selector);
+        marketplace.acceptOffer(bondId, buyer, 1 ether);
     }
 
     // ───── Batch Operations ─────
@@ -755,260 +771,7 @@ contract CofferMarketplaceTest is Test {
         assertEq(bondNft.ownerOf(bondId2), buyer2);
     }
 
-    function test_batch_revert_arrayLengthMismatch() public {
-        uint256[] memory ids = new uint256[](1);
-
-        vm.expectRevert(CofferMarketplace.ArrayLengthMismatch.selector);
-        marketplace.batchBuy(ids, new uint128[](2));
-    }
-
-    // ───── View Functions ─────
-
-    function test_isListingValid_true() public {
-        vm.prank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
-
-        assertTrue(marketplace.isListingValid(bondId));
-    }
-
-    function test_isListingValid_false_noListing() public view {
-        assertFalse(marketplace.isListingValid(bondId));
-    }
-
-    function test_isListingValid_false_expired() public {
-        uint64 exp = uint64(block.timestamp + 1 days);
-        vm.prank(seller);
-        marketplace.list(bondId, 1 ether, exp);
-
-        vm.warp(exp + 1);
-        assertFalse(marketplace.isListingValid(bondId));
-    }
-
-    function test_isListingValid_false_ownerChanged() public {
-        vm.prank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
-
-        vm.prank(seller);
-        bondNft.transferFrom(seller, buyer2, bondId);
-
-        assertFalse(marketplace.isListingValid(bondId));
-    }
-
-    function test_isOfferValid_true() public {
-        vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
-
-        assertTrue(marketplace.isOfferValid(bondId, buyer));
-    }
-
-    function test_isOfferValid_false_noOffer() public view {
-        assertFalse(marketplace.isOfferValid(bondId, buyer));
-    }
-
-    function test_isOfferValid_false_expired() public {
-        uint64 exp = uint64(block.timestamp + 1 days);
-        vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, exp);
-
-        vm.warp(exp + 1);
-        assertFalse(marketplace.isOfferValid(bondId, buyer));
-    }
-
-    function test_getBondData() public view {
-        (uint128 mv, uint32 dur, uint32 st, address cofferAddr) = marketplace.getBondData(bondId);
-        assertEq(mv, 1 ether);
-        assertEq(dur, 86400);
-        assertEq(cofferAddr, address(coffer));
-        assertGt(st, 0);
-    }
-
-    // ───── Listing with Fee ─────
-
-    function test_list_withFee() public {
-        vm.prank(owner);
-        marketplace.setFunctionFee(CofferMarketplace.list.selector, 0.001 ether, 0);
-
-        uint256 feeRecipientBefore = feeRecipient.balance;
-
-        vm.prank(seller);
-        marketplace.list{value: 0.001 ether}(bondId, 1 ether, uint64(block.timestamp + 1 days));
-
-        assertEq(feeRecipient.balance - feeRecipientBefore, 0.001 ether);
-    }
-
-    function test_list_withFee_revert_insufficientFee() public {
-        vm.prank(owner);
-        marketplace.setFunctionFee(CofferMarketplace.list.selector, 0.001 ether, 0);
-
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.list{value: 0.0001 ether}(bondId, 1 ether, uint64(block.timestamp + 1 days));
-    }
-
-    // ───── Fee Math Fuzz ─────
-
-    function testFuzz_feeCalculation(uint128 fixedFee, uint16 bps, uint256 value) public {
-        fixedFee = uint128(bound(fixedFee, 0, 1 ether));
-        bps = uint16(bound(bps, 0, 5000));
-        value = bound(value, uint256(fixedFee) + 0.01 ether, 100 ether);
-
-        vm.prank(owner);
-        marketplace.setFunctionFee(CofferMarketplace.buy.selector, fixedFee, bps);
-
-        // Calculate expected
-        uint256 afterFixed = value - fixedFee;
-        uint256 operationalValue = afterFixed * 10000 / (10000 + uint256(bps));
-        uint256 fee = value - operationalValue;
-
-        // fee >= fixedFee always
-        assertGe(fee, fixedFee);
-        // operational + fee = value
-        assertEq(operationalValue + fee, value);
-    }
-
-    function testFuzz_grossForPrice(uint128 price, uint128 fixedFee, uint16 bps) public {
-        fixedFee = uint128(bound(fixedFee, 0, 1 ether));
-        bps = uint16(bound(bps, 0, 5000));
-        price = uint128(bound(price, 0.01 ether, 10 ether));
-
-        vm.prank(owner);
-        marketplace.setFunctionFee(CofferMarketplace.buy.selector, fixedFee, bps);
-
-        // List the bond
-        vm.prank(seller);
-        marketplace.list(bondId, price, uint64(block.timestamp + 1 days));
-
-        // Buy using grossForPrice-calculated amount — should succeed
-        // gross = fixedFee + ceil(price * (10000 + bps) / 10000)
-        uint256 gross = uint256(fixedFee) + (uint256(price) * (10000 + uint256(bps)) + 9999) / 10000;
-        vm.deal(buyer, gross + 1 ether); // enough ETH
-
-        vm.prank(buyer);
-        marketplace.buy{value: gross}(bondId, price);
-
-        assertEq(bondNft.ownerOf(bondId), buyer);
-    }
-
-    // ───── Excess ETH Reverts (list / makeOffer) ─────
-
-    function test_list_revert_excessEthSent() public {
-        _setFee(CofferMarketplace.list.selector, 0.001 ether, 0);
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        marketplace.list{value: 0.002 ether}(bondId, 1 ether, uint64(block.timestamp + 1 days));
-    }
-
-    function test_makeOffer_revert_excessEthSent() public {
-        _setFee(CofferMarketplace.makeOffer.selector, 0.001 ether, 0);
-        vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        marketplace.makeOffer{value: 0.002 ether}(bondId, 1 ether, uint64(block.timestamp + 1 days));
-    }
-
-    function test_makeOffer_revert_expirationNotInFuture() public {
-        vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.ExpirationNotInFuture.selector);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp - 1));
-    }
-
-    // ───── buy() ETH Transfer Failures ─────
-
-    function test_buy_revert_insufficientPaymentForPrice() public {
-        _setFee(CofferMarketplace.buy.selector, 0.01 ether, 0);
-        _listBond(1 ether);
-        vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        marketplace.buy{value: 0.5 ether}(bondId, 1 ether);
-    }
-
-    function test_buy_revert_sellerRejectsEth() public {
-        EthRejecter rejecter = new EthRejecter();
-        uint256 rejBondId = _mintBondTo(address(rejecter));
-        rejecter.approveNft(address(bondNft), address(marketplace));
-        rejecter.doList(address(marketplace), rejBondId, 1 ether, uint64(block.timestamp + 1 days));
-
-        vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        marketplace.buy{value: 1 ether}(rejBondId, 1 ether);
-    }
-
-    function test_buy_revert_feeRecipientRejectsEth() public {
-        EthRejecter rejecter = new EthRejecter();
-        vm.prank(owner);
-        marketplace.setFeeRecipient(address(rejecter));
-        _setFee(CofferMarketplace.buy.selector, 0.01 ether, 0);
-        _listBond(1 ether);
-
-        vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        marketplace.buy{value: 1.01 ether}(bondId, 1 ether);
-    }
-
-    function test_buy_revert_buyerRefundFails() public {
-        EthRejecter rejecter = new EthRejecter();
-        _listBond(1 ether);
-        vm.deal(address(this), 2 ether);
-
-        vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        rejecter.doBuy{value: 2 ether}(address(marketplace), bondId, 1 ether);
-    }
-
-    // ───── acceptOffer() Missing Branches ─────
-
-    function test_acceptOffer_revert_bondNotOutstanding() public {
-        _makeOfferFrom(buyer, 1 ether);
-        coffer.setMaturityValue(0);
-
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
-        marketplace.acceptOffer(bondId, buyer, 1 ether);
-    }
-
-    function test_acceptOffer_revert_buyerWethDrained() public {
-        _makeOfferFrom(buyer, 1 ether);
-
-        vm.prank(buyer);
-        require(weth.transfer(address(1), 100 ether), "transfer failed");
-
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientWethBalance.selector);
-        marketplace.acceptOffer(bondId, buyer, 1 ether);
-    }
-
-    function test_acceptOffer_revert_buyerAllowanceRevoked() public {
-        _makeOfferFrom(buyer, 1 ether);
-
-        vm.prank(buyer);
-        weth.approve(address(marketplace), 0);
-
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientWethAllowance.selector);
-        marketplace.acceptOffer(bondId, buyer, 1 ether);
-    }
-
-    function test_acceptOffer_withEthPayment() public {
-        _setFee(CofferMarketplace.acceptOffer.selector, 0.001 ether, 0);
-        _makeOfferFrom(buyer, 1 ether);
-
-        uint256 feeRecipientBefore = feeRecipient.balance;
-
-        vm.prank(seller);
-        marketplace.acceptOffer{value: 0.001 ether}(bondId, buyer, 1 ether);
-
-        assertEq(bondNft.ownerOf(bondId), buyer);
-        assertEq(feeRecipient.balance - feeRecipientBefore, 0.001 ether);
-    }
-
-    function test_acceptOffer_revert_wethFeeExceedsAmount() public {
-        _setFee(CofferMarketplace.acceptOffer.selector, 1 ether, 0);
-        _makeOfferFrom(buyer, 1 ether);
-
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.acceptOffer(bondId, buyer, 1 ether);
-    }
-
-    // ───── Batch Array Mismatch Reverts ─────
+    // ───── Batch Reverts ─────
 
     function test_batchList_revert_arrayLengthMismatch() public {
         uint256[] memory ids = new uint256[](1);
@@ -1036,11 +799,6 @@ contract CofferMarketplaceTest is Test {
         marketplace.batchMakeOffers(ids, amounts, exps);
     }
 
-    function test_batchCancelOffers_revert_arrayLengthMismatch() public {
-        // batchCancelOffers no longer has a length check (single array),
-        // so this test is no longer applicable.
-    }
-
     function test_batchAcceptOffers_revert_arrayLengthMismatch() public {
         uint256[] memory ids = new uint256[](1);
         address[] memory buyers_ = new address[](2);
@@ -1048,27 +806,6 @@ contract CofferMarketplaceTest is Test {
 
         vm.expectRevert(CofferMarketplace.ArrayLengthMismatch.selector);
         marketplace.batchAcceptOffers(ids, buyers_, amounts);
-    }
-
-    // ───── Batch Fee/Payment Reverts + Refund ─────
-
-    function test_batchList_revert_insufficientFee() public {
-        uint256 bondId2 = _mintBondTo(seller);
-        _setFee(CofferMarketplace.list.selector, 0.001 ether, 0);
-
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = bondId;
-        ids[1] = bondId2;
-        uint128[] memory prices = new uint128[](2);
-        prices[0] = 1 ether;
-        prices[1] = 2 ether;
-        uint64[] memory exps = new uint64[](2);
-        exps[0] = uint64(block.timestamp + 1 days);
-        exps[1] = uint64(block.timestamp + 1 days);
-
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.batchList{value: 0.001 ether}(ids, prices, exps);
     }
 
     function test_batchBuy_revert_insufficientPayment() public {
@@ -1089,49 +826,6 @@ contract CofferMarketplaceTest is Test {
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
         marketplace.batchBuy{value: 1 ether}(ids, prices);
-    }
-
-    function test_batchMakeOffers_revert_insufficientFee() public {
-        uint256 bondId2 = _mintBondTo(seller);
-        _setFee(CofferMarketplace.makeOffer.selector, 0.001 ether, 0);
-
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = bondId;
-        ids[1] = bondId2;
-        uint128[] memory amounts = new uint128[](2);
-        amounts[0] = 1 ether;
-        amounts[1] = 1 ether;
-        uint64[] memory exps = new uint64[](2);
-        exps[0] = uint64(block.timestamp + 1 days);
-        exps[1] = uint64(block.timestamp + 1 days);
-
-        vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.batchMakeOffers{value: 0.001 ether}(ids, amounts, exps);
-    }
-
-    function test_batchAcceptOffers_revert_insufficientFee() public {
-        uint256 bondId2 = _mintBondTo(seller);
-        _setFee(CofferMarketplace.acceptOffer.selector, 0.001 ether, 0);
-
-        vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
-        vm.prank(buyer2);
-        marketplace.makeOffer(bondId2, 1 ether, uint64(block.timestamp + 1 days));
-
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = bondId;
-        ids[1] = bondId2;
-        address[] memory buyers_ = new address[](2);
-        buyers_[0] = buyer;
-        buyers_[1] = buyer2;
-        uint128[] memory amounts = new uint128[](2);
-        amounts[0] = 1 ether;
-        amounts[1] = 1 ether;
-
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.batchAcceptOffers{value: 0.001 ether}(ids, buyers_, amounts);
     }
 
     function test_batchBuy_withExcessRefund() public {
@@ -1181,12 +875,62 @@ contract CofferMarketplaceTest is Test {
         rejecter.doBatchBuy{value: 4 ether}(address(marketplace), ids, prices);
     }
 
-    // ───── View Function Branches ─────
+    // ───── View Functions ─────
+
+    function test_isListingValid_true() public {
+        vm.prank(seller);
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+
+        assertTrue(marketplace.isListingValid(bondId));
+    }
+
+    function test_isListingValid_false_noListing() public view {
+        assertFalse(marketplace.isListingValid(bondId));
+    }
+
+    function test_isListingValid_false_expired() public {
+        uint64 exp = uint64(block.timestamp + 1 days);
+        vm.prank(seller);
+        marketplace.list(bondId, 1 ether, exp);
+
+        vm.warp(exp + 1);
+        assertFalse(marketplace.isListingValid(bondId));
+    }
+
+    function test_isListingValid_false_ownerChanged() public {
+        vm.prank(seller);
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+
+        vm.prank(seller);
+        bondNft.transferFrom(seller, buyer2, bondId);
+
+        assertFalse(marketplace.isListingValid(bondId));
+    }
 
     function test_isListingValid_false_bondNotOutstanding() public {
         _listBond(1 ether);
         coffer.setMaturityValue(0);
         assertFalse(marketplace.isListingValid(bondId));
+    }
+
+    function test_isOfferValid_true() public {
+        vm.prank(buyer);
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
+
+        assertTrue(marketplace.isOfferValid(bondId, buyer));
+    }
+
+    function test_isOfferValid_false_noOffer() public view {
+        assertFalse(marketplace.isOfferValid(bondId, buyer));
+    }
+
+    function test_isOfferValid_false_expired() public {
+        uint64 exp = uint64(block.timestamp + 1 days);
+        vm.prank(buyer);
+        marketplace.makeOffer(bondId, 1 ether, exp);
+
+        vm.warp(exp + 1);
+        assertFalse(marketplace.isOfferValid(bondId, buyer));
     }
 
     function test_isOfferValid_false_insufficientBalance() public {
@@ -1207,34 +951,12 @@ contract CofferMarketplaceTest is Test {
         assertFalse(marketplace.isOfferValid(bondId, buyer));
     }
 
-    // ───── Internal Function + Fee Infrastructure ─────
-
-    function test_calculateFeeAmount_withPercentage() public {
-        CofferMarketplaceHarness harness =
-            new CofferMarketplaceHarness(owner, feeRecipient, address(weth), address(bondNft));
-        CofferMarketplace.FunctionFee memory ff = CofferMarketplace.FunctionFee(0.001 ether, 100);
-        uint256 fee = harness.exposedCalculateFeeAmount(ff, 1 ether);
-        // fixedFee + (1e * 100 / 10000) = 0.001e + 0.01e = 0.011e
-        assertEq(fee, 0.011 ether);
-    }
-
-    function test_list_revert_feeRecipientRejectsEth() public {
-        EthRejecter rejecter = new EthRejecter();
-        vm.prank(owner);
-        marketplace.setFeeRecipient(address(rejecter));
-        _setFee(CofferMarketplace.list.selector, 0.001 ether, 0);
-
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.list{value: 0.001 ether}(bondId, 1 ether, uint64(block.timestamp + 1 days));
-    }
-
-    // ───── Modifier Tests ─────
-
-    function test_setFunctionFee_revert_notOwner() public {
-        vm.prank(seller);
-        vm.expectRevert();
-        marketplace.setFunctionFee(CofferMarketplace.buy.selector, 0.001 ether, 100);
+    function test_getBondData() public view {
+        (uint128 mv, uint32 dur, uint32 st, address cofferAddr) = marketplace.getBondData(bondId);
+        assertEq(mv, 1 ether);
+        assertEq(dur, 86400);
+        assertEq(cofferAddr, address(coffer));
+        assertGt(st, 0);
     }
 
     // ───── Boundary Tests ─────

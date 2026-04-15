@@ -1,5 +1,5 @@
 //SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.33;
+pragma solidity 0.8.34;
 
 /// @title IWETH
 /// @author Coffer
@@ -28,4 +28,7 @@ interface IWETH {
     /// @param spender The address that can spend the allowance
     /// @return The remaining allowance
     function allowance(address owner, address spender) external view returns (uint256);
+
+    /// @notice Wrap ETH into WETH
+    function deposit() external payable;
 }

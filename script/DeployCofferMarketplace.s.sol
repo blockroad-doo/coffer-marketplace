@@ -10,14 +10,12 @@ import {CofferMarketplace} from "../src/CofferMarketplace.sol";
 contract DeployCofferMarketplace is Script {
     /// @notice Deploy the marketplace contract using environment variables
     function run() external {
-        address owner = vm.envAddress("MARKETPLACE_OWNER");
-        address feeRecipient = vm.envAddress("FEE_RECIPIENT");
         address weth = vm.envAddress("WETH_ADDRESS");
         address bondNft = vm.envAddress("BOND_NFT_ADDRESS");
 
         vm.startBroadcast();
 
-        CofferMarketplace marketplace = new CofferMarketplace(owner, feeRecipient, weth, bondNft);
+        CofferMarketplace marketplace = new CofferMarketplace(weth, bondNft);
 
         vm.stopBroadcast();
 
