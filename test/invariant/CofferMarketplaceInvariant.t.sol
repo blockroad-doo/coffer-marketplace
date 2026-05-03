@@ -20,13 +20,16 @@ contract CofferMarketplaceInvariantTest is Test {
     MockWETHForHandler public weth;
     CofferMarketplaceHandler public handler;
 
+    address public mpOwner = makeAddr("mpOwner");
+    address public feeRecipient = makeAddr("feeRecipient");
+
     function setUp() public virtual {
         vm.warp(100_000); // Stable starting timestamp
 
         coffer = new MockCofferForHandler();
         bondNft = new MockBondNftForHandler();
         weth = new MockWETHForHandler();
-        marketplace = new CofferMarketplace(address(weth), address(bondNft));
+        marketplace = new CofferMarketplace(address(weth), address(bondNft), mpOwner, feeRecipient);
 
         handler = new CofferMarketplaceHandler(marketplace, bondNft, coffer, weth);
         targetContract(address(handler));
@@ -88,7 +91,7 @@ contract CofferMarketplaceInvariantTest is Test {
         uint256 count = handler.getActiveOfferCount();
         for (uint256 i; i < count; ++i) {
             (uint256 bondId, address buyer) = handler.getActiveOfferKeyAt(i);
-            (, uint128 amount,) = marketplace.sOffers(bondId, buyer);
+            (,, uint128 amount,) = marketplace.sOffers(bondId, buyer);
             bytes32 key = keccak256(abi.encode(bondId, buyer));
             assertEq(amount, handler.ghostOfferAmount(key), "Offer amount mismatch");
         }
@@ -119,7 +122,7 @@ contract CofferMarketplaceInvariantTest is Test {
         uint256 count = handler.getActiveOfferCount();
         for (uint256 i; i < count; ++i) {
             (uint256 bondId, address buyer) = handler.getActiveOfferKeyAt(i);
-            (, uint128 amount,) = marketplace.sOffers(bondId, buyer);
+            (,, uint128 amount,) = marketplace.sOffers(bondId, buyer);
             assertGt(amount, 0, "Active offer must have positive amount");
         }
     }

@@ -127,15 +127,16 @@ contract EthRejecter is IERC721Receiver {
     }
 
     function doList(address mp, uint256 id, uint128 price, uint64 exp) external {
-        CofferMarketplace(mp).list(id, price, exp);
+        CofferMarketplace(payable(mp)).list(id, price, exp, 0);
     }
 
     function doBuy(address mp, uint256 id, uint128 price) external payable {
-        CofferMarketplace(mp).buy{value: msg.value}(id, price);
+        CofferMarketplace(payable(mp)).buy{value: msg.value}(id, price, 0);
     }
 
     function doBatchBuy(address mp, uint256[] calldata ids, uint128[] calldata prices) external payable {
-        CofferMarketplace(mp).batchBuy{value: msg.value}(ids, prices);
+        uint256[] memory maxFees = new uint256[](ids.length);
+        CofferMarketplace(payable(mp)).batchBuy{value: msg.value}(ids, prices, maxFees);
     }
 
     function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
@@ -154,6 +155,8 @@ contract CofferMarketplaceTest is Test {
     address public seller = makeAddr("seller");
     address public buyer = makeAddr("buyer");
     address public buyer2 = makeAddr("buyer2");
+    address public mpOwner = makeAddr("mpOwner");
+    address public feeRecipient = makeAddr("feeRecipient");
 
     uint256 public bondId;
 
@@ -163,7 +166,7 @@ contract CofferMarketplaceTest is Test {
         bondNft = new MockBondNft();
         weth = new MockWETH();
 
-        marketplace = new CofferMarketplace(address(weth), address(bondNft));
+        marketplace = new CofferMarketplace(address(weth), address(bondNft), mpOwner, feeRecipient);
 
         // Mint a bond NFT to seller
         bondId = bondNft.mintTo(seller, address(coffer));
@@ -191,16 +194,20 @@ contract CofferMarketplaceTest is Test {
 
     function _listBond(uint128 price) internal {
         vm.prank(seller);
-        marketplace.list(bondId, price, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, price, uint64(block.timestamp + 1 days), 0);
     }
 
     function _makeOfferFrom(address offeror, uint128 amount) internal {
         vm.prank(offeror);
-        marketplace.makeOffer(bondId, amount, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, amount, uint64(block.timestamp + 1 days), 0);
     }
 
     function _mintBondTo(address to) internal returns (uint256) {
         return bondNft.mintTo(to, address(coffer));
+    }
+
+    function _zeroMaxFees(uint256 n) internal pure returns (uint256[] memory out) {
+        out = new uint256[](n);
     }
 
     // ───── Constructor ─────
@@ -208,16 +215,23 @@ contract CofferMarketplaceTest is Test {
     function test_constructor() public view {
         assertEq(marketplace.I_WETH(), address(weth));
         assertEq(marketplace.I_COFFER_BOND_NFT(), address(bondNft));
+        assertEq(marketplace.owner(), mpOwner);
+        assertEq(marketplace.sFeeRecipient(), feeRecipient);
     }
 
     function test_constructor_revert_zeroWeth() public {
         vm.expectRevert(CofferMarketplace.ZeroAddress.selector);
-        new CofferMarketplace(address(0), address(bondNft));
+        new CofferMarketplace(address(0), address(bondNft), mpOwner, feeRecipient);
     }
 
     function test_constructor_revert_zeroBondNft() public {
         vm.expectRevert(CofferMarketplace.ZeroAddress.selector);
-        new CofferMarketplace(address(weth), address(0));
+        new CofferMarketplace(address(weth), address(0), mpOwner, feeRecipient);
+    }
+
+    function test_constructor_revert_zeroFeeRecipient() public {
+        vm.expectRevert(CofferMarketplace.ZeroAddress.selector);
+        new CofferMarketplace(address(weth), address(bondNft), mpOwner, address(0));
     }
 
     // ───── Listing CRUD ─────
@@ -225,7 +239,7 @@ contract CofferMarketplaceTest is Test {
     function test_list() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         vm.prank(seller);
-        marketplace.list(bondId, 1 ether, exp);
+        marketplace.list(bondId, 1 ether, exp, 0);
 
         (address s, uint128 p, uint64 e) = marketplace.sListings(bondId);
         assertEq(s, seller);
@@ -236,26 +250,26 @@ contract CofferMarketplaceTest is Test {
     function test_list_revert_zeroPrice() public {
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.ZeroPrice.selector);
-        marketplace.list(bondId, 0, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 0, uint64(block.timestamp + 1 days), 0);
     }
 
     function test_list_revert_expirationNotInFuture() public {
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.ExpirationNotInFuture.selector);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp - 1));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp - 1), 0);
     }
 
     function test_list_revert_notOwner() public {
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.NotOwner.selector);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
     }
 
     function test_list_revert_bondNotOutstanding() public {
         coffer.setMaturityValue(0);
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
     }
 
     function test_list_revert_notApproved() public {
@@ -265,7 +279,7 @@ contract CofferMarketplaceTest is Test {
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.MarketplaceNotApproved.selector);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
     }
 
     function test_list_emitsListingCancelledOnStaleOverwrite() public {
@@ -284,7 +298,7 @@ contract CofferMarketplaceTest is Test {
         emit CofferMarketplace.ListingCancelled(bondId, seller);
 
         vm.prank(buyer2);
-        marketplace.list(bondId, 2 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 2 ether, uint64(block.timestamp + 1 days), 0);
 
         // New listing belongs to buyer2
         (address s, uint128 p,) = marketplace.sListings(bondId);
@@ -294,10 +308,10 @@ contract CofferMarketplaceTest is Test {
 
     function test_cancelListing() public {
         vm.prank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         vm.prank(seller);
-        marketplace.cancelListing(bondId);
+        marketplace.cancelListing(bondId, 0);
 
         (address s,,) = marketplace.sListings(bondId);
         assertEq(s, address(0));
@@ -305,11 +319,11 @@ contract CofferMarketplaceTest is Test {
 
     function test_cancelListing_revert_notSeller() public {
         vm.prank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.NotSeller.selector);
-        marketplace.cancelListing(bondId);
+        marketplace.cancelListing(bondId, 0);
     }
 
     // ───── Buy Flow ─────
@@ -317,12 +331,12 @@ contract CofferMarketplaceTest is Test {
     function test_buy() public {
         uint128 price = 1 ether;
         vm.prank(seller);
-        marketplace.list(bondId, price, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, price, uint64(block.timestamp + 1 days), 0);
 
         uint256 sellerBefore = seller.balance;
 
         vm.prank(buyer);
-        marketplace.buy{value: price}(bondId, price);
+        marketplace.buy{value: price}(bondId, price, 0);
 
         assertEq(bondNft.ownerOf(bondId), buyer);
         assertEq(seller.balance - sellerBefore, price);
@@ -331,12 +345,12 @@ contract CofferMarketplaceTest is Test {
     function test_buy_withExcessRefund() public {
         uint128 price = 1 ether;
         vm.prank(seller);
-        marketplace.list(bondId, price, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, price, uint64(block.timestamp + 1 days), 0);
 
         uint256 buyerBefore = buyer.balance;
 
         vm.prank(buyer);
-        marketplace.buy{value: 2 ether}(bondId, price);
+        marketplace.buy{value: 2 ether}(bondId, price, 0);
 
         assertEq(bondNft.ownerOf(bondId), buyer);
         // buyer paid 1 ether price, got 1 ether back as refund
@@ -346,42 +360,42 @@ contract CofferMarketplaceTest is Test {
     function test_buy_revert_listingNotFound() public {
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingNotFound.selector);
-        marketplace.buy{value: 1 ether}(bondId, 1 ether);
+        marketplace.buy{value: 1 ether}(bondId, 1 ether, 0);
     }
 
     function test_buy_revert_listingExpired() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         vm.prank(seller);
-        marketplace.list(bondId, 1 ether, exp);
+        marketplace.list(bondId, 1 ether, exp, 0);
 
         vm.warp(exp + 1);
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingExpired.selector);
-        marketplace.buy{value: 1 ether}(bondId, 1 ether);
+        marketplace.buy{value: 1 ether}(bondId, 1 ether, 0);
     }
 
     function test_buy_revert_priceMismatch() public {
         vm.prank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.PriceMismatch.selector);
-        marketplace.buy{value: 2 ether}(bondId, 2 ether);
+        marketplace.buy{value: 2 ether}(bondId, 2 ether, 0);
     }
 
     function test_buy_revert_cannotBuyOwnListing() public {
         vm.prank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.CannotBuyOwnListing.selector);
-        marketplace.buy{value: 1 ether}(bondId, 1 ether);
+        marketplace.buy{value: 1 ether}(bondId, 1 ether, 0);
     }
 
     function test_buy_revert_staleListing() public {
         vm.prank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         // Transfer NFT away from seller (making listing stale)
         vm.prank(seller);
@@ -389,25 +403,25 @@ contract CofferMarketplaceTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.SellerNoLongerOwnsNft.selector);
-        marketplace.buy{value: 1 ether}(bondId, 1 ether);
+        marketplace.buy{value: 1 ether}(bondId, 1 ether, 0);
     }
 
     function test_buy_revert_bondNotOutstanding() public {
         vm.prank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         coffer.setMaturityValue(0);
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
-        marketplace.buy{value: 1 ether}(bondId, 1 ether);
+        marketplace.buy{value: 1 ether}(bondId, 1 ether, 0);
     }
 
     function test_buy_revert_insufficientPayment() public {
         _listBond(1 ether);
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        marketplace.buy{value: 0.5 ether}(bondId, 1 ether);
+        marketplace.buy{value: 0.5 ether}(bondId, 1 ether, 0);
     }
 
     function test_buy_sellerRejectsEth_fallsBackToWeth() public {
@@ -417,7 +431,7 @@ contract CofferMarketplaceTest is Test {
         rejecter.doList(address(marketplace), rejBondId, 1 ether, uint64(block.timestamp + 1 days));
 
         vm.prank(buyer);
-        marketplace.buy{value: 1 ether}(rejBondId, 1 ether);
+        marketplace.buy{value: 1 ether}(rejBondId, 1 ether, 0);
 
         // NFT transferred to buyer
         assertEq(bondNft.ownerOf(rejBondId), buyer);
@@ -442,25 +456,26 @@ contract CofferMarketplaceTest is Test {
     function test_makeOffer() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, exp);
+        marketplace.makeOffer(bondId, 1 ether, exp, 0);
 
-        (address b, uint128 amt, uint64 e) = marketplace.sOffers(bondId, buyer);
+        (address b, uint64 e, uint128 amt, uint128 f) = marketplace.sOffers(bondId, buyer);
         assertEq(b, buyer);
         assertEq(amt, 1 ether);
         assertEq(e, exp);
+        assertEq(f, 0);
     }
 
     function test_makeOffer_revert_zeroAmount() public {
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ZeroAmount.selector);
-        marketplace.makeOffer(bondId, 0, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 0, uint64(block.timestamp + 1 days), 0);
     }
 
     function test_makeOffer_revert_bondNotOutstanding() public {
         coffer.setMaturityValue(0);
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
     }
 
     function test_makeOffer_revert_insufficientWethBalance() public {
@@ -470,7 +485,7 @@ contract CofferMarketplaceTest is Test {
 
         vm.prank(poorBuyer);
         vm.expectRevert(CofferMarketplace.InsufficientWethBalance.selector);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
     }
 
     function test_makeOffer_revert_insufficientWethAllowance() public {
@@ -480,33 +495,33 @@ contract CofferMarketplaceTest is Test {
 
         vm.prank(noApproveBuyer);
         vm.expectRevert(CofferMarketplace.InsufficientWethAllowance.selector);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
     }
 
     function test_makeOffer_revert_expirationNotInFuture() public {
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ExpirationNotInFuture.selector);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp - 1));
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp - 1), 0);
     }
 
     function test_cancelOffer() public {
         vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         vm.prank(buyer);
-        marketplace.cancelOffer(bondId);
+        marketplace.cancelOffer(bondId, 0);
 
-        (address b,,) = marketplace.sOffers(bondId, buyer);
+        (address b,,,) = marketplace.sOffers(bondId, buyer);
         assertEq(b, address(0));
     }
 
     function test_cancelOffer_revert_notBuyer() public {
         vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.NotBuyer.selector);
-        marketplace.cancelOffer(bondId);
+        marketplace.cancelOffer(bondId, 0);
     }
 
     // ───── Accept Offer Flow ─────
@@ -514,7 +529,7 @@ contract CofferMarketplaceTest is Test {
     function test_acceptOffer() public {
         uint128 offerAmount = 1 ether;
         vm.prank(buyer);
-        marketplace.makeOffer(bondId, offerAmount, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, offerAmount, uint64(block.timestamp + 1 days), 0);
 
         uint256 sellerWethBefore = weth.balanceOf(seller);
 
@@ -534,7 +549,7 @@ contract CofferMarketplaceTest is Test {
     function test_acceptOffer_revert_offerExpired() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, exp);
+        marketplace.makeOffer(bondId, 1 ether, exp, 0);
 
         vm.warp(exp + 1);
 
@@ -545,7 +560,7 @@ contract CofferMarketplaceTest is Test {
 
     function test_acceptOffer_revert_notOwner() public {
         vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         vm.prank(buyer2);
         vm.expectRevert(CofferMarketplace.NotOwner.selector);
@@ -558,7 +573,7 @@ contract CofferMarketplaceTest is Test {
         vm.prank(seller);
         weth.approve(address(marketplace), type(uint256).max);
         vm.prank(seller);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         // Seller tries to accept own offer
         vm.prank(seller);
@@ -573,7 +588,7 @@ contract CofferMarketplaceTest is Test {
 
         // Buyer makes offer on seller2's bond
         vm.prank(buyer);
-        marketplace.makeOffer(bondId2, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId2, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         // Seller2 tries to accept without approving marketplace
         vm.prank(seller2);
@@ -583,7 +598,7 @@ contract CofferMarketplaceTest is Test {
 
     function test_acceptOffer_revert_amountMismatch() public {
         vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.AmountMismatch.selector);
@@ -640,7 +655,7 @@ contract CofferMarketplaceTest is Test {
         exps[1] = uint64(block.timestamp + 2 days);
 
         vm.prank(seller);
-        marketplace.batchList(ids, prices, exps);
+        marketplace.batchList(ids, prices, exps, _zeroMaxFees(2));
 
         (address s1, uint128 p1,) = marketplace.sListings(bondId);
         (address s2, uint128 p2,) = marketplace.sListings(bondId2);
@@ -658,8 +673,8 @@ contract CofferMarketplaceTest is Test {
 
         // List both
         vm.startPrank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
-        marketplace.list(bondId2, 2 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
+        marketplace.list(bondId2, 2 ether, uint64(block.timestamp + 1 days), 0);
         vm.stopPrank();
 
         uint256[] memory ids = new uint256[](2);
@@ -670,7 +685,7 @@ contract CofferMarketplaceTest is Test {
         prices[1] = 2 ether;
 
         vm.prank(buyer);
-        marketplace.batchBuy{value: 3 ether}(ids, prices);
+        marketplace.batchBuy{value: 3 ether}(ids, prices, _zeroMaxFees(2));
 
         assertEq(bondNft.ownerOf(bondId), buyer);
         assertEq(bondNft.ownerOf(bondId2), buyer);
@@ -682,8 +697,8 @@ contract CofferMarketplaceTest is Test {
         bondNft.setApprovalForAll(address(marketplace), true);
 
         vm.startPrank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
-        marketplace.list(bondId2, 2 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
+        marketplace.list(bondId2, 2 ether, uint64(block.timestamp + 1 days), 0);
         vm.stopPrank();
 
         uint256[] memory ids = new uint256[](2);
@@ -691,7 +706,7 @@ contract CofferMarketplaceTest is Test {
         ids[1] = bondId2;
 
         vm.prank(seller);
-        marketplace.batchCancelListings(ids);
+        marketplace.batchCancelListings(ids, _zeroMaxFees(2));
 
         (address s1,,) = marketplace.sListings(bondId);
         (address s2,,) = marketplace.sListings(bondId2);
@@ -713,10 +728,10 @@ contract CofferMarketplaceTest is Test {
         exps[1] = uint64(block.timestamp + 2 days);
 
         vm.prank(buyer);
-        marketplace.batchMakeOffers(ids, amounts, exps);
+        marketplace.batchMakeOffers(ids, amounts, exps, _zeroMaxFees(2));
 
-        (address b1, uint128 a1,) = marketplace.sOffers(bondId, buyer);
-        (address b2, uint128 a2,) = marketplace.sOffers(bondId2, buyer);
+        (address b1, , uint128 a1,) = marketplace.sOffers(bondId, buyer);
+        (address b2, , uint128 a2,) = marketplace.sOffers(bondId2, buyer);
         assertEq(b1, buyer);
         assertEq(a1, 1 ether);
         assertEq(b2, buyer);
@@ -727,8 +742,8 @@ contract CofferMarketplaceTest is Test {
         uint256 bondId2 = bondNft.mintTo(seller, address(coffer));
 
         vm.startPrank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
-        marketplace.makeOffer(bondId2, 2 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
+        marketplace.makeOffer(bondId2, 2 ether, uint64(block.timestamp + 1 days), 0);
         vm.stopPrank();
 
         uint256[] memory ids = new uint256[](2);
@@ -736,10 +751,10 @@ contract CofferMarketplaceTest is Test {
         ids[1] = bondId2;
 
         vm.prank(buyer);
-        marketplace.batchCancelOffers(ids);
+        marketplace.batchCancelOffers(ids, _zeroMaxFees(2));
 
-        (address b1,,) = marketplace.sOffers(bondId, buyer);
-        (address b2,,) = marketplace.sOffers(bondId2, buyer);
+        (address b1,,,) = marketplace.sOffers(bondId, buyer);
+        (address b2,,,) = marketplace.sOffers(bondId2, buyer);
         assertEq(b1, address(0));
         assertEq(b2, address(0));
     }
@@ -750,9 +765,9 @@ contract CofferMarketplaceTest is Test {
         bondNft.setApprovalForAll(address(marketplace), true);
 
         vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
         vm.prank(buyer2);
-        marketplace.makeOffer(bondId2, 2 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId2, 2 ether, uint64(block.timestamp + 1 days), 0);
 
         uint256[] memory ids = new uint256[](2);
         ids[0] = bondId;
@@ -779,7 +794,7 @@ contract CofferMarketplaceTest is Test {
         uint64[] memory exps = new uint64[](2);
 
         vm.expectRevert(CofferMarketplace.ArrayLengthMismatch.selector);
-        marketplace.batchList(ids, prices, exps);
+        marketplace.batchList(ids, prices, exps, _zeroMaxFees(2));
     }
 
     function test_batchBuy_revert_arrayLengthMismatch() public {
@@ -787,7 +802,7 @@ contract CofferMarketplaceTest is Test {
         uint128[] memory prices = new uint128[](2);
 
         vm.expectRevert(CofferMarketplace.ArrayLengthMismatch.selector);
-        marketplace.batchBuy(ids, prices);
+        marketplace.batchBuy(ids, prices, _zeroMaxFees(2));
     }
 
     function test_batchMakeOffers_revert_arrayLengthMismatch() public {
@@ -796,7 +811,7 @@ contract CofferMarketplaceTest is Test {
         uint64[] memory exps = new uint64[](2);
 
         vm.expectRevert(CofferMarketplace.ArrayLengthMismatch.selector);
-        marketplace.batchMakeOffers(ids, amounts, exps);
+        marketplace.batchMakeOffers(ids, amounts, exps, _zeroMaxFees(2));
     }
 
     function test_batchAcceptOffers_revert_arrayLengthMismatch() public {
@@ -808,12 +823,28 @@ contract CofferMarketplaceTest is Test {
         marketplace.batchAcceptOffers(ids, buyers_, amounts);
     }
 
+    function test_batchCancelListings_revert_arrayLengthMismatch() public {
+        uint256[] memory ids = new uint256[](1);
+        uint256[] memory maxFees = new uint256[](2);
+
+        vm.expectRevert(CofferMarketplace.ArrayLengthMismatch.selector);
+        marketplace.batchCancelListings(ids, maxFees);
+    }
+
+    function test_batchCancelOffers_revert_arrayLengthMismatch() public {
+        uint256[] memory ids = new uint256[](1);
+        uint256[] memory maxFees = new uint256[](2);
+
+        vm.expectRevert(CofferMarketplace.ArrayLengthMismatch.selector);
+        marketplace.batchCancelOffers(ids, maxFees);
+    }
+
     function test_batchBuy_revert_insufficientPayment() public {
         uint256 bondId2 = _mintBondTo(seller);
 
         vm.startPrank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
-        marketplace.list(bondId2, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
+        marketplace.list(bondId2, 1 ether, uint64(block.timestamp + 1 days), 0);
         vm.stopPrank();
 
         uint256[] memory ids = new uint256[](2);
@@ -825,15 +856,15 @@ contract CofferMarketplaceTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        marketplace.batchBuy{value: 1 ether}(ids, prices);
+        marketplace.batchBuy{value: 1 ether}(ids, prices, _zeroMaxFees(2));
     }
 
     function test_batchBuy_withExcessRefund() public {
         uint256 bondId2 = _mintBondTo(seller);
 
         vm.startPrank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
-        marketplace.list(bondId2, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
+        marketplace.list(bondId2, 1 ether, uint64(block.timestamp + 1 days), 0);
         vm.stopPrank();
 
         uint256[] memory ids = new uint256[](2);
@@ -846,7 +877,7 @@ contract CofferMarketplaceTest is Test {
         uint256 buyerBefore = buyer.balance;
 
         vm.prank(buyer);
-        marketplace.batchBuy{value: 4 ether}(ids, prices);
+        marketplace.batchBuy{value: 4 ether}(ids, prices, _zeroMaxFees(2));
 
         assertEq(bondNft.ownerOf(bondId), buyer);
         assertEq(bondNft.ownerOf(bondId2), buyer);
@@ -857,8 +888,8 @@ contract CofferMarketplaceTest is Test {
         uint256 bondId2 = _mintBondTo(seller);
 
         vm.startPrank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
-        marketplace.list(bondId2, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
+        marketplace.list(bondId2, 1 ether, uint64(block.timestamp + 1 days), 0);
         vm.stopPrank();
 
         EthRejecter rejecter = new EthRejecter();
@@ -879,7 +910,7 @@ contract CofferMarketplaceTest is Test {
 
     function test_isListingValid_true() public {
         vm.prank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         assertTrue(marketplace.isListingValid(bondId));
     }
@@ -891,7 +922,7 @@ contract CofferMarketplaceTest is Test {
     function test_isListingValid_false_expired() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         vm.prank(seller);
-        marketplace.list(bondId, 1 ether, exp);
+        marketplace.list(bondId, 1 ether, exp, 0);
 
         vm.warp(exp + 1);
         assertFalse(marketplace.isListingValid(bondId));
@@ -899,7 +930,7 @@ contract CofferMarketplaceTest is Test {
 
     function test_isListingValid_false_ownerChanged() public {
         vm.prank(seller);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         vm.prank(seller);
         bondNft.transferFrom(seller, buyer2, bondId);
@@ -915,7 +946,7 @@ contract CofferMarketplaceTest is Test {
 
     function test_isOfferValid_true() public {
         vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 1 ether, uint64(block.timestamp + 1 days), 0);
 
         assertTrue(marketplace.isOfferValid(bondId, buyer));
     }
@@ -927,7 +958,7 @@ contract CofferMarketplaceTest is Test {
     function test_isOfferValid_false_expired() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1 ether, exp);
+        marketplace.makeOffer(bondId, 1 ether, exp, 0);
 
         vm.warp(exp + 1);
         assertFalse(marketplace.isOfferValid(bondId, buyer));
@@ -964,12 +995,12 @@ contract CofferMarketplaceTest is Test {
     function test_list_expirationExactlyNow() public {
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.ExpirationNotInFuture.selector);
-        marketplace.list(bondId, 1 ether, uint64(block.timestamp));
+        marketplace.list(bondId, 1 ether, uint64(block.timestamp), 0);
     }
 
     function test_list_priceOneWei() public {
         vm.prank(seller);
-        marketplace.list(bondId, 1, uint64(block.timestamp + 1 days));
+        marketplace.list(bondId, 1, uint64(block.timestamp + 1 days), 0);
 
         (address s, uint128 p,) = marketplace.sListings(bondId);
         assertEq(s, seller);
@@ -978,9 +1009,9 @@ contract CofferMarketplaceTest is Test {
 
     function test_makeOffer_amountOneWei() public {
         vm.prank(buyer);
-        marketplace.makeOffer(bondId, 1, uint64(block.timestamp + 1 days));
+        marketplace.makeOffer(bondId, 1, uint64(block.timestamp + 1 days), 0);
 
-        (address b, uint128 amt,) = marketplace.sOffers(bondId, buyer);
+        (address b, , uint128 amt,) = marketplace.sOffers(bondId, buyer);
         assertEq(b, buyer);
         assertEq(amt, 1);
     }

@@ -4,6 +4,12 @@ pragma solidity 0.8.34;
 import {Test} from "forge-std/Test.sol";
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
 
+interface IERC721Receiver {
+    function onERC721Received(address operator, address from, uint256 tokenId, bytes calldata data)
+        external
+        returns (bytes4);
+}
+
 // ───── Mocks (per-bond maturity, needed for invariant testing) ─────
 
 /// @dev Minimal ERC721 mock with cofferOf support
@@ -30,10 +36,21 @@ contract MockBondNftForHandler {
         return _coffers[tokenId];
     }
 
-    function transferFrom(address from, address to, uint256 tokenId) external {
+    function transferFrom(address from, address to, uint256 tokenId) public {
         require(_owners[tokenId] == from, "ERC721: not owner");
         require(msg.sender == from || _operatorApprovals[from][msg.sender], "ERC721: not approved");
         _owners[tokenId] = to;
+    }
+
+    function safeTransferFrom(address from, address to, uint256 tokenId) external {
+        transferFrom(from, to, tokenId);
+        if (to.code.length > 0) {
+            require(
+                IERC721Receiver(to).onERC721Received(msg.sender, from, tokenId, "")
+                    == IERC721Receiver.onERC721Received.selector,
+                "ERC721: unsafe recipient"
+            );
+        }
     }
 
     function setApprovalForAll(address operator, bool approved) external {
@@ -243,7 +260,7 @@ contract CofferMarketplaceHandler is Test {
         uint64 expiration = uint64(block.timestamp + bound(expOffset, 1, 365 days));
 
         vm.prank(actor);
-        marketplace.list(bondId, price, expiration);
+        marketplace.list(bondId, price, expiration, 0);
 
         // New listing or overwrite (marketplace allows overwriting)
         if (ghostHasActiveListing[bondId]) {
@@ -269,7 +286,7 @@ contract CofferMarketplaceHandler is Test {
         address seller = ghostListingSeller[bondId];
 
         vm.prank(seller);
-        marketplace.cancelListing(bondId);
+        marketplace.cancelListing(bondId, 0);
 
         _removeListingFromGhost(bondId, idx);
         ++ghostTotalListingsCancelled;
@@ -298,7 +315,7 @@ contract CofferMarketplaceHandler is Test {
         if (block.timestamp > exp) return;
 
         vm.prank(buyer);
-        marketplace.buy{value: price}(bondId, price);
+        marketplace.buy{value: price}(bondId, price, 0);
 
         _removeListingFromGhost(bondId, idx);
         ghostBondOwner[bondId] = buyer;
@@ -322,7 +339,7 @@ contract CofferMarketplaceHandler is Test {
         if (weth.allowance(buyer, address(marketplace)) < amount) return;
 
         vm.prank(buyer);
-        marketplace.makeOffer(bondId, amount, expiration);
+        marketplace.makeOffer(bondId, amount, expiration, 0);
 
         // New offer or overwrite for same (bondId, buyer) pair
         bytes32 key = _offerKey(bondId, buyer);
@@ -347,7 +364,7 @@ contract CofferMarketplaceHandler is Test {
         GhostOfferKey memory ok_ = _ghostActiveOfferKeys[idx];
 
         vm.prank(ok_.buyer);
-        marketplace.cancelOffer(ok_.bondId);
+        marketplace.cancelOffer(ok_.bondId, 0);
 
         _removeOfferFromGhost(ok_.bondId, ok_.buyer, idx);
         ++ghostTotalOffersCancelled;
@@ -368,7 +385,7 @@ contract CofferMarketplaceHandler is Test {
         if (!ghostBondOutstanding[ok_.bondId]) return;
 
         // Check offer not expired
-        (,, uint64 exp) = marketplace.sOffers(ok_.bondId, ok_.buyer);
+        (, uint64 exp,,) = marketplace.sOffers(ok_.bondId, ok_.buyer);
         if (block.timestamp > exp) return;
 
         // Check buyer's WETH
