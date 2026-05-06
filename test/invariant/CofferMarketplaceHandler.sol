@@ -312,6 +312,7 @@ contract CofferMarketplaceHandler is Test {
         if (ghostBondOwner[bondId] != seller) return;
         if (buyer.balance < price) return;
         (,, uint64 exp) = marketplace.sListings(bondId);
+        // forge-lint-disable-next-line block-timestamp
         if (block.timestamp > exp) return;
 
         vm.prank(buyer);
@@ -386,6 +387,7 @@ contract CofferMarketplaceHandler is Test {
 
         // Check offer not expired
         (, uint64 exp,,) = marketplace.sOffers(ok_.bondId, ok_.buyer);
+        // forge-lint-disable-next-line block-timestamp
         if (block.timestamp > exp) return;
 
         // Check buyer's WETH

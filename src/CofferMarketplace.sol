@@ -271,6 +271,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
     function isListingValid(uint256 _bondId) external view returns (bool) {
         Listing memory listing = sListings[_bondId];
         if (listing.seller == address(0)) return false;
+        // forge-lint-disable-next-line block-timestamp
         if (block.timestamp > listing.expiration) return false;
         if (ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) != listing.seller) return false;
         if (!_isBondOutstanding(_bondId)) return false;
@@ -284,6 +285,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
     function isOfferValid(uint256 _bondId, address _buyer) external view returns (bool) {
         Offer memory o = sOffers[_bondId][_buyer];
         if (o.buyer == address(0)) return false;
+        // forge-lint-disable-next-line block-timestamp
         if (block.timestamp > o.expiration) return false;
         uint256 totalWeth = uint256(o.wethAmount) + uint256(o.fee);
         if (IWETH(I_WETH).balanceOf(_buyer) < totalWeth) return false;
@@ -348,6 +350,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
         returns (uint256 fee)
     {
         require(_price > 0, ZeroPrice());
+        // forge-lint-disable-next-line block-timestamp
         require(_expiration > block.timestamp, ExpirationNotInFuture());
         // slither-disable-next-line calls-loop
         require(ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) == _seller, NotOwner());
@@ -387,6 +390,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
         Listing memory listing = sListings[_bondId];
         require(listing.seller != address(0), ListingNotFound());
         // solhint-disable-next-line gas-strict-inequalities
+        // forge-lint-disable-next-line block-timestamp
         require(block.timestamp <= listing.expiration, ListingExpired());
         require(_isBondOutstanding(_bondId), BondNotOutstanding());
 
@@ -432,6 +436,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
         returns (uint256 fee)
     {
         require(_wethAmount > 0, ZeroAmount());
+        // forge-lint-disable-next-line block-timestamp
         require(_expiration > block.timestamp, ExpirationNotInFuture());
         require(_isBondOutstanding(_bondId), BondNotOutstanding());
 
@@ -479,6 +484,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
         Offer memory o = sOffers[_bondId][_buyer];
         require(o.buyer != address(0), OfferNotFound());
         // solhint-disable-next-line gas-strict-inequalities
+        // forge-lint-disable-next-line block-timestamp
         require(block.timestamp <= o.expiration, OfferExpired());
         require(_isBondOutstanding(_bondId), BondNotOutstanding());
         // slither-disable-next-line calls-loop
