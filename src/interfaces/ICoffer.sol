@@ -1,17 +1,29 @@
 //SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.34;
 
-/// @title ICoffer
-/// @author Coffer
-/// @notice Interface for Coffer contracts
+/**
+ * @title ICoffer
+ * @author Blockroad Ltd
+ * @notice Minimal interface for reading bond data from a Coffer contract
+ */
 interface ICoffer {
-    /// @notice Get holder conditions for a specific bond
-    /// @param bondId The bond NFT ID
-    /// @return bondMaturityValue The bond maturity value
-    /// @return duration The bond duration in seconds
-    /// @return startTimestamp The bond start timestamp
+    /// @notice Returns the bond conditions for a given bond ID
+    /// @param bondId The ID of the bond to query
+    /// @return bondMaturityValue The value the bond pays at maturity
+    /// @return duration The duration of the bond in seconds
+    /// @return startTimestamp The timestamp when the bond was created
+    /// @return consensusWithdrawClosed Whether the consensus path has been closed for this bond (either an EIP-7002
+    /// request was issued or funds were reserved in-place via the cover-in-place fallback)
     function sHolderConditions(uint256 bondId)
         external
         view
-        returns (uint128 bondMaturityValue, uint32 duration, uint32 startTimestamp);
+        returns (uint128 bondMaturityValue, uint32 duration, uint32 startTimestamp, bool consensusWithdrawClosed);
+
+    /// @notice Returns the first part of the validator public key
+    /// @return The first 32 bytes of the validator public key
+    function iPublicKeyPart1() external view returns (bytes32);
+
+    /// @notice Returns the second part of the validator public key
+    /// @return The remaining 16 bytes of the validator public key
+    function iPublicKeyPart2() external view returns (bytes16);
 }

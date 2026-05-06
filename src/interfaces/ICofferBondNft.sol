@@ -1,49 +1,54 @@
 //SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.34;
 
-/// @title ICofferBondNft
-/// @author Coffer
-/// @notice Interface for Coffer bond NFT contracts
+/**
+ * @title ICofferBondNft
+ * @author Blockroad Ltd
+ * @notice Interface for factory-based NFT management in Coffer smart contract
+ * @notice Coffer contracts use this interface to interact with the shared NFT contract
+ */
 interface ICofferBondNft {
-    /// @notice Mint a new bond NFT to the specified holder
-    /// @param holderAddress The address to mint the bond to
-    /// @return bondId The newly minted bond token ID
+    /// @notice Mints a new Coffer bond NFT to the holder
+    /// @param holderAddress The address of the bond holder
+    /// @return bondId The ID of the newly minted bond NFT
     function mintCofferBond(address holderAddress) external returns (uint256 bondId);
 
-    /// @notice Burn a bond NFT
-    /// @param bondId The bond token ID to burn
+    /// @notice Burns a Coffer bond NFT
+    /// @param bondId The ID of the bond NFT to burn
     function burnCofferBond(uint256 bondId) external;
 
-    /// @notice Get the Coffer associated with a bond
-    /// @param bondId The bond token ID
-    /// @return The Coffer address
+    /// @notice Returns the Coffer contract address that issued the given bond
+    /// @param bondId The ID of the bond NFT
+    /// @return The address of the issuing Coffer contract
     function cofferOf(uint256 bondId) external view returns (address);
 
-    /// @notice Get the owner of a bond NFT
-    /// @param bondId The bond token ID
-    /// @return The owner address
+    /// @notice Returns the owner of the specified bond NFT
+    /// @param bondId The ID of the bond NFT
+    /// @return The address of the bond NFT owner
     function ownerOf(uint256 bondId) external view returns (address);
 
-    /// @notice Transfer a bond NFT between addresses
-    /// @param from The current owner
-    /// @param to The new owner
-    /// @param tokenId The bond token ID
-    function transferFrom(address from, address to, uint256 tokenId) external;
+    /// @notice Emits EIP-4906 MetadataUpdate event for the given bond
+    /// @param bondId The ID of the bond NFT whose metadata changed
+    function emitMetadataUpdate(uint256 bondId) external;
 
-    /// @notice Safely transfer a bond NFT, checking receiver support
-    /// @param from The current owner
-    /// @param to The new owner
-    /// @param tokenId The bond token ID
+    /// @notice Registers a Coffer contract as authorized to mint bonds
+    /// @param coffer The address of the Coffer contract to register
+    function registerCoffer(address coffer) external;
+
+    /// @notice Returns whether a Coffer address is registered
+    /// @param coffer The address to check
+    /// @return True if the address is a registered Coffer
+    function isRegisteredCoffer(address coffer) external view returns (bool);
+
+    /// @notice Safely transfers a bond NFT from one address to another
+    /// @param from The current owner of the bond
+    /// @param to The new owner of the bond
+    /// @param tokenId The bond token ID to transfer
     function safeTransferFrom(address from, address to, uint256 tokenId) external;
 
-    /// @notice Set or revoke approval for an operator to manage all tokens
-    /// @param operator The operator address
-    /// @param approved Whether to approve or revoke
-    function setApprovalForAll(address operator, bool approved) external;
-
     /// @notice Check if an operator is approved for all tokens of an owner
-    /// @param owner The token owner
-    /// @param operator The operator to check
-    /// @return Whether the operator is approved
+    /// @param owner The token owner address
+    /// @param operator The operator address to check
+    /// @return Whether the operator is approved for all
     function isApprovedForAll(address owner, address operator) external view returns (bool);
 }

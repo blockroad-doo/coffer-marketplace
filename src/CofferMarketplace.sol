@@ -434,7 +434,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
         returns (uint128 maturityValue, uint32 duration, uint32 startTimestamp, address cofferAddress)
     {
         cofferAddress = ICofferBondNft(I_COFFER_BOND_NFT).cofferOf(_bondId);
-        (maturityValue, duration, startTimestamp) = ICoffer(cofferAddress).sHolderConditions(_bondId);
+        (maturityValue, duration, startTimestamp,) = ICoffer(cofferAddress).sHolderConditions(_bondId);
     }
 
     // ───── Internal: Fee Math ─────
@@ -656,7 +656,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
         // slither-disable-next-line calls-loop
         address cofferAddr = ICofferBondNft(I_COFFER_BOND_NFT).cofferOf(_bondId);
         // slither-disable-next-line unused-return,calls-loop
-        (maturityValue,,) = ICoffer(cofferAddr).sHolderConditions(_bondId);
+        (maturityValue,,,) = ICoffer(cofferAddr).sHolderConditions(_bondId);
     }
 
     /// @notice Check if a bond is outstanding (maturityValue != 0)

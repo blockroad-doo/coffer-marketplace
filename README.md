@@ -4,7 +4,7 @@ A secondary marketplace for trading [Coffer Bond NFTs](#what-is-a-coffer-bond-nf
 
 Built with Solidity 0.8.34, [Foundry](https://book.getfoundry.sh/), and OpenZeppelin (`Ownable2Step`, `ReentrancyGuard`, `SafeERC20`, `Address`).
 
-> **Fee-bearing by design.** Every primary action (list, cancelListing, buy, makeOffer, cancelOffer, acceptOffer) collects a fee. Profit-based fees apply to `buy` and `acceptOffer`; flat app-usage fees apply to the other four. Fees accumulate in the contract and are swept to a fee recipient by the contract owner. See [`defining_fees.md`](./defining_fees.md) for the full fee philosophy and per-function tiers.
+> **Fee-bearing by design.** Every primary action (list, cancelListing, buy, makeOffer, cancelOffer, acceptOffer) collects a fee. Profit-based fees apply to `buy` and `acceptOffer`; flat app-usage fees apply to the other four. Fees accumulate in the contract and are swept to a fee recipient by the contract owner.
 
 ---
 
@@ -95,7 +95,7 @@ export FEE_RECIPIENT=0x...
 forge script script/DeployCofferMarketplace.s.sol \
   --rpc-url <RPC_URL> --broadcast --verify
 
-# 2. Apply default fees (values from defining_fees.md)
+# 2. Apply default fees
 export MARKETPLACE_ADDRESS=0x...  # from step 1 output
 forge script script/ConfigureFees.s.sol \
   --rpc-url <RPC_URL> --broadcast

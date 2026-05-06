@@ -9,7 +9,6 @@ out/
 
 # Docs
 docs/
-defining_fees.md
 invariant_eth_conservation_flake.md
 
 # Dotenv file
