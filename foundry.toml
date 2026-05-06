@@ -37,6 +37,4 @@ no_match_path = "test/invariant/*"
 
 [lint]
 exclude_lints = ["mixed-case-function"]
-
-[profile.lints]
 block-timestamp = "allow"
