@@ -427,54 +427,6 @@ contract CofferMarketplaceFeesTest is Test {
 
     // ───── Batch fee scaling ─────
 
-    function test_batchList_chargesPerItemFee() public {
-        uint256 bondId2 = bondNft.mintTo(seller, address(coffer));
-        vm.prank(seller);
-        bondNft.setApprovalForAll(address(marketplace), true);
-
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = bondId;
-        ids[1] = bondId2;
-        uint128[] memory prices = new uint128[](2);
-        prices[0] = 1 ether;
-        prices[1] = 2 ether;
-        uint64[] memory exps = new uint64[](2);
-        exps[0] = uint64(block.timestamp + 1 days);
-        exps[1] = uint64(block.timestamp + 1 days);
-        uint256[] memory maxFees = new uint256[](2);
-        maxFees[0] = FLAT_FEE;
-        maxFees[1] = FLAT_FEE;
-
-        vm.prank(seller);
-        marketplace.batchList{value: uint256(FLAT_FEE) * 2}(ids, prices, exps, maxFees);
-
-        assertEq(address(marketplace).balance, uint256(FLAT_FEE) * 2);
-    }
-
-    function test_batchList_revert_wrongTotalFee() public {
-        uint256 bondId2 = bondNft.mintTo(seller, address(coffer));
-        vm.prank(seller);
-        bondNft.setApprovalForAll(address(marketplace), true);
-
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = bondId;
-        ids[1] = bondId2;
-        uint128[] memory prices = new uint128[](2);
-        prices[0] = 1 ether;
-        prices[1] = 2 ether;
-        uint64[] memory exps = new uint64[](2);
-        exps[0] = uint64(block.timestamp + 1 days);
-        exps[1] = uint64(block.timestamp + 1 days);
-        uint256[] memory maxFees = new uint256[](2);
-        maxFees[0] = FLAT_FEE;
-        maxFees[1] = FLAT_FEE;
-
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        // only pay 1 item's worth of fee
-        marketplace.batchList{value: FLAT_FEE}(ids, prices, exps, maxFees);
-    }
-
     // ───── Non-payable: acceptOffer rejects ETH ─────
 
     function test_acceptOffer_rejectsSentEth() public {
@@ -538,76 +490,7 @@ contract CofferMarketplaceFeesTest is Test {
         marketplace.cancelOffer{value: FLAT_FEE - 1}(bondId, FLAT_FEE);
     }
 
-    // ───── InsufficientFee on batch wrappers (not covered by batchList) ─────
-
-    function test_batchCancelListings_revert_wrongTotalFee() public {
-        uint256 bondId2 = bondNft.mintTo(seller, address(coffer));
-
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = bondId;
-        ids[1] = bondId2;
-        uint128[] memory prices = new uint128[](2);
-        prices[0] = 1 ether;
-        prices[1] = 2 ether;
-        uint64[] memory exps = new uint64[](2);
-        exps[0] = uint64(block.timestamp + 1 days);
-        exps[1] = uint64(block.timestamp + 1 days);
-        uint256[] memory maxFees = new uint256[](2);
-        maxFees[0] = FLAT_FEE;
-        maxFees[1] = FLAT_FEE;
-
-        vm.prank(seller);
-        marketplace.batchList{value: uint256(FLAT_FEE) * 2}(ids, prices, exps, maxFees);
-
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.batchCancelListings{value: FLAT_FEE}(ids, maxFees);
-    }
-
-    function test_batchMakeOffers_revert_wrongTotalFee() public {
-        uint256 bondId2 = bondNft.mintTo(seller, address(coffer));
-
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = bondId;
-        ids[1] = bondId2;
-        uint128[] memory amounts = new uint128[](2);
-        amounts[0] = 1 ether;
-        amounts[1] = 1 ether;
-        uint64[] memory exps = new uint64[](2);
-        exps[0] = uint64(block.timestamp + 1 days);
-        exps[1] = uint64(block.timestamp + 1 days);
-        uint256[] memory maxFees = new uint256[](2);
-        maxFees[0] = FLAT_FEE;
-        maxFees[1] = FLAT_FEE;
-
-        vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.batchMakeOffers{value: FLAT_FEE}(ids, amounts, exps, maxFees);
-    }
-
-    function test_batchCancelOffers_revert_wrongTotalFee() public {
-        uint256 bondId2 = bondNft.mintTo(seller, address(coffer));
-
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = bondId;
-        ids[1] = bondId2;
-        uint128[] memory amounts = new uint128[](2);
-        amounts[0] = 1 ether;
-        amounts[1] = 1 ether;
-        uint64[] memory exps = new uint64[](2);
-        exps[0] = uint64(block.timestamp + 1 days);
-        exps[1] = uint64(block.timestamp + 1 days);
-        uint256[] memory maxFees = new uint256[](2);
-        maxFees[0] = FLAT_FEE;
-        maxFees[1] = FLAT_FEE;
-
-        vm.prank(buyer);
-        marketplace.batchMakeOffers{value: uint256(FLAT_FEE) * 2}(ids, amounts, exps, maxFees);
-
-        vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.batchCancelOffers{value: FLAT_FEE}(ids, maxFees);
-    }
+    // ───── Fee on fixed-price actions (list + makeOffer) ─────
 
     // ───── FeeExceedsMax at makeOffer uint128 cast ─────
 

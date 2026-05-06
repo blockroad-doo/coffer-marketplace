@@ -140,7 +140,6 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
     /// @param fixedFee The fixed fee amount
     /// @param percentageBps The percentage fee in basis points
     event FunctionFeeSet(bytes4 indexed selector, uint128 fixedFee, uint16 percentageBps);
-    /* solhint-enable gas-indexed-events */
     /// @notice Emitted when ETH fees are claimed
     /// @param recipient The address that received the fees
     /// @param amount The amount of ETH claimed
@@ -149,6 +148,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
     /// @param recipient The address that received the fees
     /// @param amount The amount of WETH claimed
     event WethFeesClaimed(address indexed recipient, uint256 amount);
+    /* solhint-enable gas-indexed-events */
 
     // ───── Constructor ─────
 
@@ -241,10 +241,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
     /// @param _wethAmount The WETH amount to offer
     /// @param _expiration The offer expiration timestamp
     /// @param _maxFee The maximum ETH fee the caller is willing to pay for this action
-    function makeOffer(uint256 _bondId, uint128 _wethAmount, uint64 _expiration, uint256 _maxFee)
-        external
-        payable
-    {
+    function makeOffer(uint256 _bondId, uint128 _wethAmount, uint64 _expiration, uint256 _maxFee) external payable {
         uint256 fee = _makeOffer(msg.sender, _bondId, _wethAmount, _expiration, _maxFee);
         require(msg.value == fee, InsufficientFee());
     }
@@ -264,134 +261,6 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
     /// @param _expectedAmount The expected WETH amount to prevent front-running
     function acceptOffer(uint256 _bondId, address _buyer, uint128 _expectedAmount) external nonReentrant {
         _acceptOffer(msg.sender, _bondId, _buyer, _expectedAmount);
-    }
-
-    // ───── Batch Functions ─────
-
-    /// @notice Batch list multiple bond NFTs
-    /// @param _bondIds The bond token IDs to list
-    /// @param _prices The listing prices in wei
-    /// @param _expirations The listing expiration timestamps
-    /// @param _maxFees The per-item maximum ETH fees
-    function batchList(
-        uint256[] calldata _bondIds,
-        uint128[] calldata _prices,
-        uint64[] calldata _expirations,
-        uint256[] calldata _maxFees
-    ) external payable nonReentrant {
-        uint256 len = _bondIds.length;
-        require(
-            len == _prices.length && len == _expirations.length && len == _maxFees.length, ArrayLengthMismatch()
-        );
-
-        uint256 totalFee;
-        for (uint256 i; i < len; ++i) {
-            totalFee += _list(msg.sender, _bondIds[i], _prices[i], _expirations[i], _maxFees[i]);
-        }
-        require(msg.value == totalFee, InsufficientFee());
-    }
-
-    /// @notice Batch buy multiple listed bond NFTs
-    /// @param _bondIds The bond token IDs to purchase
-    /// @param _expectedPrices The expected listing prices to prevent front-running
-    /// @param _maxFees The per-item maximum ETH fees
-    function batchBuy(
-        uint256[] calldata _bondIds,
-        uint128[] calldata _expectedPrices,
-        uint256[] calldata _maxFees
-    ) external payable nonReentrant {
-        uint256 len = _bondIds.length;
-        require(len == _expectedPrices.length && len == _maxFees.length, ArrayLengthMismatch());
-
-        uint256 totalRemaining = msg.value;
-        for (uint256 i; i < len; ++i) {
-            uint256 feeCharged = _buy(msg.sender, _bondIds[i], _expectedPrices[i], totalRemaining, _maxFees[i]);
-            // _buy asserts totalRemaining >= price + feeCharged, so this subtraction is safe
-            totalRemaining -= (uint256(_expectedPrices[i]) + feeCharged);
-        }
-
-        if (totalRemaining > 0) {
-            // slither-disable-next-line arbitrary-send-eth
-            require(_safeTransferETH(msg.sender, totalRemaining), InsufficientPayment());
-        }
-    }
-
-    /// @notice Batch cancel multiple listings
-    /// @param _bondIds The bond token IDs to cancel
-    /// @param _maxFees The per-item maximum ETH fees
-    function batchCancelListings(uint256[] calldata _bondIds, uint256[] calldata _maxFees)
-        external
-        payable
-        nonReentrant
-    {
-        uint256 len = _bondIds.length;
-        require(len == _maxFees.length, ArrayLengthMismatch());
-
-        uint256 totalFee;
-        for (uint256 i; i < len; ++i) {
-            totalFee += _cancelListing(msg.sender, _bondIds[i], _maxFees[i]);
-        }
-        require(msg.value == totalFee, InsufficientFee());
-    }
-
-    /// @notice Batch make multiple WETH offers
-    /// @param _bondIds The bond token IDs to make offers on
-    /// @param _wethAmounts The WETH amounts to offer
-    /// @param _expirations The offer expiration timestamps
-    /// @param _maxFees The per-item maximum ETH fees
-    function batchMakeOffers(
-        uint256[] calldata _bondIds,
-        uint128[] calldata _wethAmounts,
-        uint64[] calldata _expirations,
-        uint256[] calldata _maxFees
-    ) external payable nonReentrant {
-        uint256 len = _bondIds.length;
-        require(
-            len == _wethAmounts.length && len == _expirations.length && len == _maxFees.length,
-            ArrayLengthMismatch()
-        );
-
-        uint256 totalFee;
-        for (uint256 i; i < len; ++i) {
-            totalFee += _makeOffer(msg.sender, _bondIds[i], _wethAmounts[i], _expirations[i], _maxFees[i]);
-        }
-        require(msg.value == totalFee, InsufficientFee());
-    }
-
-    /// @notice Batch cancel multiple offers
-    /// @param _bondIds The bond token IDs to cancel offers for
-    /// @param _maxFees The per-item maximum ETH fees
-    function batchCancelOffers(uint256[] calldata _bondIds, uint256[] calldata _maxFees)
-        external
-        payable
-        nonReentrant
-    {
-        uint256 len = _bondIds.length;
-        require(len == _maxFees.length, ArrayLengthMismatch());
-
-        uint256 totalFee;
-        for (uint256 i; i < len; ++i) {
-            totalFee += _cancelOffer(msg.sender, _bondIds[i], _maxFees[i]);
-        }
-        require(msg.value == totalFee, InsufficientFee());
-    }
-
-    /// @notice Batch accept multiple WETH offers
-    /// @dev Fees are read from each Offer struct (locked at makeOffer). No ETH required.
-    /// @param _bondIds The bond token IDs
-    /// @param _buyers The addresses of the offer makers
-    /// @param _expectedAmounts The expected WETH amounts to prevent front-running
-    function batchAcceptOffers(
-        uint256[] calldata _bondIds,
-        address[] calldata _buyers,
-        uint128[] calldata _expectedAmounts
-    ) external nonReentrant {
-        uint256 len = _bondIds.length;
-        require(len == _buyers.length && len == _expectedAmounts.length, ArrayLengthMismatch());
-
-        for (uint256 i; i < len; ++i) {
-            _acceptOffer(msg.sender, _bondIds[i], _buyers[i], _expectedAmounts[i]);
-        }
     }
 
     // ───── View Functions ─────
@@ -434,6 +303,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
         returns (uint128 maturityValue, uint32 duration, uint32 startTimestamp, address cofferAddress)
     {
         cofferAddress = ICofferBondNft(I_COFFER_BOND_NFT).cofferOf(_bondId);
+        // slither-disable-next-line unused-return
         (maturityValue, duration, startTimestamp,) = ICoffer(cofferAddress).sHolderConditions(_bondId);
     }
 
@@ -441,6 +311,10 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
 
     /// @notice Compute a profit-based fee: fixedFee + profit * bps / BPS_DENOMINATOR.
     /// @dev Returns zero if the selector has no configured fee.
+    /// @param _selector Function selector to look up fee config
+    /// @param _profit The profit value to calculate percentage on
+    /// @param _maxFee Maximum fee the caller is willing to pay
+    /// @return fee Total calculated fee
     function _calculateFeeOnProfit(bytes4 _selector, uint256 _profit, uint256 _maxFee)
         internal
         view
@@ -456,6 +330,9 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
 
     /// @notice Compute a flat fee: fixedFee only (percentage ignored).
     /// @dev Returns zero if the selector has no configured fixed fee.
+    /// @param _selector Function selector to look up fee config
+    /// @param _maxFee Maximum fee the caller is willing to pay
+    /// @return fee Total calculated fee
     function _calculateFlatFee(bytes4 _selector, uint256 _maxFee) internal view returns (uint256 fee) {
         FunctionFee memory ff = sFunctionFees[_selector];
         if (ff.fixedFee == 0) return 0;
@@ -503,13 +380,10 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
         emit ListingCancelled(_bondId, _caller);
     }
 
-    function _buy(
-        address _buyer,
-        uint256 _bondId,
-        uint128 _expectedPrice,
-        uint256 _payment,
-        uint256 _maxFee
-    ) internal returns (uint256 fee) {
+    function _buy(address _buyer, uint256 _bondId, uint128 _expectedPrice, uint256 _payment, uint256 _maxFee)
+        internal
+        returns (uint256 fee)
+    {
         Listing memory listing = sListings[_bondId];
         require(listing.seller != address(0), ListingNotFound());
         // solhint-disable-next-line gas-strict-inequalities
@@ -553,13 +427,10 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
 
     // ───── Internal: Offer Logic ─────
 
-    function _makeOffer(
-        address _buyer,
-        uint256 _bondId,
-        uint128 _wethAmount,
-        uint64 _expiration,
-        uint256 _maxFee
-    ) internal returns (uint256 fee) {
+    function _makeOffer(address _buyer, uint256 _bondId, uint128 _wethAmount, uint64 _expiration, uint256 _maxFee)
+        internal
+        returns (uint256 fee)
+    {
         require(_wethAmount > 0, ZeroAmount());
         require(_expiration > block.timestamp, ExpirationNotInFuture());
         require(_isBondOutstanding(_bondId), BondNotOutstanding());
@@ -570,8 +441,8 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
         // Lock the WETH fee for acceptOffer using CURRENT fee config (revenue-based on offerer profit)
         uint128 maturityValue = _getBondMaturity(_bondId);
         uint256 revenue = maturityValue > _wethAmount ? uint256(maturityValue) - uint256(_wethAmount) : 0;
-        uint256 lockedFeeFull =
-            _calculateFeeOnProfit(this.acceptOffer.selector, revenue, type(uint256).max);
+        uint256 lockedFeeFull = _calculateFeeOnProfit(this.acceptOffer.selector, revenue, type(uint256).max);
+        // solhint-disable-next-line gas-strict-inequalities
         require(lockedFeeFull <= type(uint128).max, FeeExceedsMax());
         // forge-lint: disable-next-line(unsafe-typecast)
         uint128 lockedFee = uint128(lockedFeeFull);
