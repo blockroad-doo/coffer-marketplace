@@ -10,9 +10,8 @@ interface IERC721Receiver {
         returns (bytes4);
 }
 
-// ───── Mocks (per-bond maturity, needed for invariant testing) ─────
+// ───── Mocks ─────
 
-/// @dev Minimal ERC721 mock with cofferOf support
 contract MockBondNftForHandler {
     mapping(uint256 => address) private _owners;
     mapping(address => mapping(address => bool)) private _operatorApprovals;
@@ -62,7 +61,6 @@ contract MockBondNftForHandler {
     }
 }
 
-/// @dev Per-bond maturity values (unit test mock uses a single global value)
 contract MockCofferForHandler {
     mapping(uint256 => uint128) public maturityValues;
     uint32 public constant DURATION = 86_400;
@@ -81,7 +79,6 @@ contract MockCofferForHandler {
     }
 }
 
-/// @dev Minimal ERC-20 mock with mint
 contract MockWETHForHandler {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
@@ -118,77 +115,100 @@ contract MockWETHForHandler {
 
 // ───── Handler ─────
 
-/// @title CofferMarketplaceHandler
-/// @notice Stateful fuzz handler for CofferMarketplace invariant tests.
-///         Ghost state mirrors on-chain state for invariant verification.
 contract CofferMarketplaceHandler is Test {
-    // ───── External Contracts ─────
+    // ──── EIP-712 Constants ────
+
+    bytes32 constant LISTING_TYPEHASH =
+        keccak256("Listing(uint256 bondId,uint128 price,uint64 expiration,uint256 nonce,uint256 globalNonce)");
+    bytes32 constant OFFER_TYPEHASH = keccak256(
+        "Offer(uint256 bondId,uint128 wethAmount,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+    );
+    bytes32 constant DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+
+    // ──── External Contracts ────
 
     CofferMarketplace public marketplace;
     MockBondNftForHandler public bondNft;
     MockCofferForHandler public coffer;
     MockWETHForHandler public weth;
 
-    // ───── Actors (every actor can be both buyer and seller) ─────
+    // ──── Actors with known private keys ────
 
     address[] public actors;
+    mapping(address => uint256) public actorPk;
 
-    // ───── Ghost State: Listings (keyed by bondId) ─────
+    // ──── Ghost State: Nonces (mirrors on-chain nonce state) ────
 
-    uint256[] public ghostActiveListingBondIds;
-    mapping(uint256 bondId => bool) public ghostHasActiveListing;
-    mapping(uint256 bondId => uint256 arrayIndex) internal _ghostListingIdx;
-    mapping(uint256 bondId => address seller) public ghostListingSeller;
-    mapping(uint256 bondId => uint128 price) public ghostListingPrice;
+    // There is no on-chain registration. A maker signs off-chain at the CURRENT on-chain nonce, which
+    // the handler models by recording the signed (nonce, globalNonce) pair without any chain call. A
+    // listing is "active" (still fillable on-chain) iff:
+    //   ghostListingHasOrder[seller][bondId] is true (an order was signed and not consumed)
+    //   AND ghostListingSignedNonce[seller][bondId]       == marketplace.sListingNonce(seller, bondId)
+    //   AND ghostListingSignedGlobalNonce[seller][bondId] == marketplace.sGlobalListingNonce(seller)
+    // The hasOrder flag is needed because the first order for a bond is signed at nonce 0, which a
+    // bare "signedNonce > 0" check could not witness. ghostListingNonce / ghostListingGlobalNonce stay
+    // plain chain mirrors for the nonce-match invariants (so they ALWAYS equal chain). A fill or a
+    // single cancel bumps the per-bond nonce, and cancelAll bumps the global nonce, either of which
+    // leaves the signed-* values stale so the listing reads inactive, exactly how the contract's own
+    // revoke check works.
+    mapping(address => mapping(uint256 => uint256)) public ghostListingNonce;
+    mapping(address => uint256) public ghostListingGlobalNonce;
+    mapping(address => mapping(uint256 => bool)) public ghostListingHasOrder;
+    mapping(address => mapping(uint256 => uint256)) public ghostListingSignedNonce;
+    mapping(address => mapping(uint256 => uint256)) public ghostListingSignedGlobalNonce;
+    // Track signed price/expiration for buy reconstruction
+    mapping(address => mapping(uint256 => uint128)) public ghostListingPrice;
+    mapping(address => mapping(uint256 => uint64)) public ghostListingExpiration;
 
-    // ───── Ghost State: Offers (keyed by bondId + buyer) ─────
+    mapping(address => mapping(uint256 => uint256)) public ghostOfferNonce;
+    mapping(address => uint256) public ghostOfferGlobalNonce;
+    mapping(address => mapping(uint256 => bool)) public ghostOfferHasOrder;
+    // Signed (nonce, globalNonce) pair fixed at signing time; see listing note above.
+    mapping(address => mapping(uint256 => uint256)) public ghostOfferSignedNonce;
+    mapping(address => mapping(uint256 => uint256)) public ghostOfferSignedGlobalNonce;
+    mapping(address => mapping(uint256 => uint128)) public ghostOfferAmount;
+    mapping(address => mapping(uint256 => uint64)) public ghostOfferExpiration;
+    mapping(address => mapping(uint256 => uint256)) public ghostOfferMaxFee;
 
-    struct GhostOfferKey {
-        uint256 bondId;
-        address buyer;
-    }
-
-    GhostOfferKey[] internal _ghostActiveOfferKeys;
-    mapping(bytes32 key => bool) public ghostHasActiveOffer;
-    mapping(bytes32 key => uint256 arrayIndex) internal _ghostOfferIdx;
-    mapping(bytes32 key => uint128 amount) public ghostOfferAmount;
-
-    // ───── Ghost State: Bonds ─────
+    // ──── Ghost State: Bonds ────
 
     uint256[] public ghostMintedBondIds;
     mapping(uint256 bondId => address owner) public ghostBondOwner;
     mapping(uint256 bondId => bool outstanding) public ghostBondOutstanding;
 
-    // ───── Ghost State: Lifecycle Counters ─────
+    // ──── Ghost State: Lifecycle Counters ────
 
     uint256 public ghostTotalListingsCreated;
     uint256 public ghostTotalListingsCancelled;
     uint256 public ghostTotalListingsPurchased;
-    uint256 public ghostTotalListingsInvalidated;
+    uint256 public ghostTotalListingsRevoked;
     uint256 public ghostTotalOffersMade;
     uint256 public ghostTotalOffersCancelled;
     uint256 public ghostTotalOffersAccepted;
-    uint256 public ghostTotalOffersInvalidated;
+    uint256 public ghostTotalOffersRevoked;
 
-    // ───── Ghost State: Conservation ─────
+    // ──── Ghost State: Conservation ────
 
     uint256 public ghostInitialTotalEth;
     uint256 public ghostInitialTotalWeth;
 
-    // ───── Call Counters (debug) ─────
+    // ──── Call Counters ────
 
     uint256 public callsMintBond;
-    uint256 public callsList;
+    uint256 public callsSignListing;
     uint256 public callsCancelListing;
-    uint256 public callsBuy;
-    uint256 public callsMakeOffer;
+    uint256 public callsCancelAllListings;
+    uint256 public callsBuySignedListing;
+    uint256 public callsSignOffer;
     uint256 public callsCancelOffer;
-    uint256 public callsAcceptOffer;
+    uint256 public callsCancelAllOffers;
+    uint256 public callsAcceptSignedOffer;
     uint256 public callsWarpTime;
     uint256 public callsSetNonOutstanding;
     uint256 public callsTransferNft;
 
-    // ───── Constructor ─────
+    // ──── Constructor ────
 
     constructor(
         CofferMarketplace _marketplace,
@@ -201,30 +221,28 @@ contract CofferMarketplaceHandler is Test {
         coffer = _coffer;
         weth = _weth;
 
-        // Create 5 actors — each can act as both buyer and seller
         for (uint256 i; i < 5; ++i) {
-            address actor = makeAddr(string.concat("actor", vm.toString(i)));
+            uint256 pk = uint256(keccak256(abi.encodePacked("actor", i)));
+            address actor = vm.addr(pk);
             actors.push(actor);
+            actorPk[actor] = pk;
             vm.deal(actor, 1000 ether);
 
-            // Approve marketplace for NFT transfers (seller side)
             vm.prank(actor);
             bondNft.setApprovalForAll(address(marketplace), true);
 
-            // Mint WETH and approve marketplace (buyer side)
             weth.mint(actor, 1000 ether);
             vm.prank(actor);
             weth.approve(address(marketplace), type(uint256).max);
         }
 
-        // Pre-mint 5 bonds distributed across actors
         for (uint256 i; i < 5; ++i) {
             address owner = actors[i % actors.length];
-            uint256 bondId = bondNft.mintTo(owner, address(coffer));
-            coffer.setMaturityValue(bondId, 1 ether);
-            ghostMintedBondIds.push(bondId);
-            ghostBondOwner[bondId] = owner;
-            ghostBondOutstanding[bondId] = true;
+            uint256 id = bondNft.mintTo(owner, address(coffer));
+            coffer.setMaturityValue(id, 1 ether);
+            ghostMintedBondIds.push(id);
+            ghostBondOwner[id] = owner;
+            ghostBondOutstanding[id] = true;
         }
 
         ghostInitialTotalEth = _sumEthBalances();
@@ -235,23 +253,18 @@ contract CofferMarketplaceHandler is Test {
     //                      Handler Functions
     // ═══════════════════════════════════════════════════════════════
 
-    /// @notice Mint a new bond to a random actor
     function handlerMintBond(uint256 actorSeed) external {
         ++callsMintBond;
-
         address owner = actors[actorSeed % actors.length];
-        uint256 bondId = bondNft.mintTo(owner, address(coffer));
-        coffer.setMaturityValue(bondId, 1 ether);
-
-        ghostMintedBondIds.push(bondId);
-        ghostBondOwner[bondId] = owner;
-        ghostBondOutstanding[bondId] = true;
+        uint256 id = bondNft.mintTo(owner, address(coffer));
+        coffer.setMaturityValue(id, 1 ether);
+        ghostMintedBondIds.push(id);
+        ghostBondOwner[id] = owner;
+        ghostBondOutstanding[id] = true;
     }
 
-    /// @notice List an outstanding bond owned by a random actor
-    function handlerList(uint256 actorSeed, uint256 bondSeed, uint128 price, uint64 expOffset) external {
-        ++callsList;
-
+    function handlerSignListing(uint256 actorSeed, uint256 bondSeed, uint128 price, uint64 expOffset) external {
+        ++callsSignListing;
         address actor = actors[actorSeed % actors.length];
         uint256 bondId = _findOwnedOutstandingBond(actor, bondSeed);
         if (bondId == 0) return;
@@ -259,73 +272,99 @@ contract CofferMarketplaceHandler is Test {
         price = uint128(bound(price, 1, 10 ether));
         uint64 expiration = uint64(block.timestamp + bound(expOffset, 1, 365 days));
 
-        vm.prank(actor);
-        marketplace.list(bondId, price, expiration, 0);
+        // The maker signs off-chain at the current on-chain nonce. No chain call, only ghost state.
+        uint256 nonce = marketplace.sListingNonce(actor, bondId);
+        uint256 gNonce = marketplace.sGlobalListingNonce(actor);
 
-        // New listing or overwrite (marketplace allows overwriting)
-        if (ghostHasActiveListing[bondId]) {
-            ++ghostTotalListingsInvalidated; // old listing replaced
-        } else {
-            _ghostListingIdx[bondId] = ghostActiveListingBondIds.length;
-            ghostActiveListingBondIds.push(bondId);
-            ghostHasActiveListing[bondId] = true;
-        }
-        ghostListingSeller[bondId] = actor;
-        ghostListingPrice[bondId] = price;
+        ghostListingHasOrder[actor][bondId] = true;
+        ghostListingSignedNonce[actor][bondId] = nonce;
+        ghostListingSignedGlobalNonce[actor][bondId] = gNonce;
+        ghostListingPrice[actor][bondId] = price;
+        ghostListingExpiration[actor][bondId] = expiration;
         ++ghostTotalListingsCreated;
     }
 
-    /// @notice Cancel a random active listing
-    function handlerCancelListing(uint256 listingSeed) external {
+    function handlerCancelListing(uint256 actorSeed, uint256 bondSeed) external {
         ++callsCancelListing;
-        uint256 len = ghostActiveListingBondIds.length;
-        if (len == 0) return;
+        address actor = actors[actorSeed % actors.length];
+        uint256 bondId = _findRegisteredListing(actor, bondSeed);
+        if (bondId == 0) return;
 
-        uint256 idx = listingSeed % len;
-        uint256 bondId = ghostActiveListingBondIds[idx];
-        address seller = ghostListingSeller[bondId];
+        vm.prank(actor);
+        marketplace.cancelListing(bondId);
 
-        vm.prank(seller);
-        marketplace.cancelListing(bondId, 0);
-
-        _removeListingFromGhost(bondId, idx);
+        ghostListingNonce[actor][bondId] = marketplace.sListingNonce(actor, bondId);
         ++ghostTotalListingsCancelled;
     }
 
-    /// @notice Buy a random active listing
-    function handlerBuy(uint256 buyerSeed, uint256 listingSeed) external {
-        ++callsBuy;
-        uint256 len = ghostActiveListingBondIds.length;
-        if (len == 0) return;
+    function handlerCancelAllListings(uint256 actorSeed) external {
+        ++callsCancelAllListings;
+        address actor = actors[actorSeed % actors.length];
 
-        uint256 idx = listingSeed % len;
-        uint256 bondId = ghostActiveListingBondIds[idx];
-        address seller = ghostListingSeller[bondId];
-        uint128 price = ghostListingPrice[bondId];
+        // Count the listings this cancelAll actually invalidates (active under the current global
+        // nonce) before bumping it; afterwards their signed global nonce is stale, so they read
+        // inactive and can never be resolved again.
+        uint256 revoked = _countActiveListings(actor);
 
-        // Pick a buyer that is not the seller
+        vm.prank(actor);
+        marketplace.cancelAllListings();
+
+        ghostListingGlobalNonce[actor] = marketplace.sGlobalListingNonce(actor);
+        ghostTotalListingsRevoked += revoked;
+    }
+
+    function handlerBuySignedListing(uint256 buyerSeed, uint256 bondSeed) external {
+        ++callsBuySignedListing;
+        uint256 bondId = _findActiveListedBond(bondSeed);
+        if (bondId == 0) return;
+
+        // Find the seller who has an active listing for this bond
+        address seller;
+        uint128 price;
+        uint64 expiration;
+        uint256 nonce;
+        uint256 gNonce;
+        for (uint256 i; i < actors.length; ++i) {
+            address actor = actors[i];
+            if (
+                ghostListingHasOrder[actor][bondId]
+                    && ghostListingSignedNonce[actor][bondId] == marketplace.sListingNonce(actor, bondId)
+                    && ghostListingSignedGlobalNonce[actor][bondId] == marketplace.sGlobalListingNonce(actor)
+            ) {
+                seller = actor;
+                price = ghostListingPrice[actor][bondId];
+                expiration = ghostListingExpiration[actor][bondId];
+                nonce = ghostListingSignedNonce[actor][bondId];
+                gNonce = ghostListingSignedGlobalNonce[actor][bondId];
+                break;
+            }
+        }
+        if (seller == address(0)) return;
+
         address buyer = _pickActorExcluding(buyerSeed, seller);
         if (buyer == address(0)) return;
 
-        // Pre-flight: bond outstanding, seller still owns, listing not expired, buyer can pay
+        // Pre-flight checks
         if (!ghostBondOutstanding[bondId]) return;
         if (ghostBondOwner[bondId] != seller) return;
         if (buyer.balance < price) return;
-        (,, uint64 exp) = marketplace.sListings(bondId);
         // forge-lint-disable-next-line block-timestamp
-        if (block.timestamp > exp) return;
+        if (block.timestamp > expiration) return;
+
+        // Reconstruct the seller's signature from the listing parameters
+        bytes memory sig = _signListing(actorPk[seller], bondId, price, expiration, nonce, gNonce);
 
         vm.prank(buyer);
-        marketplace.buy{value: price}(bondId, price, 0);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, expiration, nonce, gNonce, 0, sig);
 
-        _removeListingFromGhost(bondId, idx);
+        // Nonce auto-incremented by contract
+        ghostListingNonce[seller][bondId] = marketplace.sListingNonce(seller, bondId);
         ghostBondOwner[bondId] = buyer;
         ++ghostTotalListingsPurchased;
     }
 
-    /// @notice Make a WETH offer on a random outstanding bond
-    function handlerMakeOffer(uint256 buyerSeed, uint256 bondSeed, uint128 amount, uint64 expOffset) external {
-        ++callsMakeOffer;
+    function handlerSignOffer(uint256 buyerSeed, uint256 bondSeed, uint128 amount, uint64 expOffset) external {
+        ++callsSignOffer;
         if (ghostMintedBondIds.length == 0) return;
 
         address buyer = actors[buyerSeed % actors.length];
@@ -337,89 +376,104 @@ contract CofferMarketplaceHandler is Test {
         amount = uint128(bound(amount, 1, wethBal));
         uint64 expiration = uint64(block.timestamp + bound(expOffset, 1, 365 days));
 
-        if (weth.allowance(buyer, address(marketplace)) < amount) return;
+        // The offerer signs off-chain at the current on-chain nonce. No chain call, only ghost state.
+        uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
+        uint256 gNonce = marketplace.sGlobalOfferNonce(buyer);
 
-        vm.prank(buyer);
-        marketplace.makeOffer(bondId, amount, expiration, 0);
-
-        // New offer or overwrite for same (bondId, buyer) pair
-        bytes32 key = _offerKey(bondId, buyer);
-        if (ghostHasActiveOffer[key]) {
-            ++ghostTotalOffersInvalidated; // old offer replaced
-        } else {
-            _ghostOfferIdx[key] = _ghostActiveOfferKeys.length;
-            _ghostActiveOfferKeys.push(GhostOfferKey({bondId: bondId, buyer: buyer}));
-            ghostHasActiveOffer[key] = true;
-        }
-        ghostOfferAmount[key] = amount;
+        ghostOfferHasOrder[buyer][bondId] = true;
+        ghostOfferSignedNonce[buyer][bondId] = nonce;
+        ghostOfferSignedGlobalNonce[buyer][bondId] = gNonce;
+        ghostOfferAmount[buyer][bondId] = amount;
+        ghostOfferExpiration[buyer][bondId] = expiration;
+        ghostOfferMaxFee[buyer][bondId] = type(uint256).max;
         ++ghostTotalOffersMade;
     }
 
-    /// @notice Cancel a random active offer
-    function handlerCancelOffer(uint256 offerSeed) external {
+    function handlerCancelOffer(uint256 actorSeed, uint256 bondSeed) external {
         ++callsCancelOffer;
-        uint256 len = _ghostActiveOfferKeys.length;
-        if (len == 0) return;
+        address actor = actors[actorSeed % actors.length];
+        uint256 bondId = _findRegisteredOffer(actor, bondSeed);
+        if (bondId == 0) return;
 
-        uint256 idx = offerSeed % len;
-        GhostOfferKey memory ok_ = _ghostActiveOfferKeys[idx];
+        vm.prank(actor);
+        marketplace.cancelOffer(bondId);
 
-        vm.prank(ok_.buyer);
-        marketplace.cancelOffer(ok_.bondId, 0);
-
-        _removeOfferFromGhost(ok_.bondId, ok_.buyer, idx);
+        ghostOfferNonce[actor][bondId] = marketplace.sOfferNonce(actor, bondId);
         ++ghostTotalOffersCancelled;
     }
 
-    /// @notice Accept a random active offer (called by current bond owner)
-    function handlerAcceptOffer(uint256 offerSeed) external {
-        ++callsAcceptOffer;
-        uint256 len = _ghostActiveOfferKeys.length;
-        if (len == 0) return;
+    function handlerCancelAllOffers(uint256 actorSeed) external {
+        ++callsCancelAllOffers;
+        address actor = actors[actorSeed % actors.length];
 
-        uint256 idx = offerSeed % len;
-        GhostOfferKey memory ok_ = _ghostActiveOfferKeys[idx];
-        bytes32 key = _offerKey(ok_.bondId, ok_.buyer);
+        // Count the offers this cancelAll actually invalidates before bumping the global nonce.
+        uint256 revoked = _countActiveOffers(actor);
 
-        address seller = ghostBondOwner[ok_.bondId];
-        if (seller == address(0)) return;
-        if (!ghostBondOutstanding[ok_.bondId]) return;
+        vm.prank(actor);
+        marketplace.cancelAllOffers();
 
-        // Check offer not expired
-        (, uint64 exp,,) = marketplace.sOffers(ok_.bondId, ok_.buyer);
-        // forge-lint-disable-next-line block-timestamp
-        if (block.timestamp > exp) return;
-
-        // Check buyer's WETH
-        uint128 amount = ghostOfferAmount[key];
-        if (weth.balanceOf(ok_.buyer) < amount) return;
-        if (weth.allowance(ok_.buyer, address(marketplace)) < amount) return;
-
-        // Check seller has marketplace approval
-        if (!bondNft.isApprovedForAll(seller, address(marketplace))) return;
-
-        vm.prank(seller);
-        marketplace.acceptOffer(ok_.bondId, ok_.buyer, amount);
-
-        _removeOfferFromGhost(ok_.bondId, ok_.buyer, idx);
-        ghostBondOwner[ok_.bondId] = ok_.buyer;
-        ++ghostTotalOffersAccepted;
-
-        // Remove stale listing if seller changed
-        if (ghostHasActiveListing[ok_.bondId] && ghostListingSeller[ok_.bondId] != ok_.buyer) {
-            _removeListingFromGhost(ok_.bondId, _ghostListingIdx[ok_.bondId]);
-            ++ghostTotalListingsInvalidated;
-        }
+        ghostOfferGlobalNonce[actor] = marketplace.sGlobalOfferNonce(actor);
+        ghostTotalOffersRevoked += revoked;
     }
 
-    /// @notice Advance block.timestamp to test expirations
+    function handlerAcceptSignedOffer(uint256 bondSeed) external {
+        ++callsAcceptSignedOffer;
+        uint256 bondId = _findActiveListedBond(bondSeed);
+        if (bondId == 0) return;
+
+        address seller = ghostBondOwner[bondId];
+        if (seller == address(0)) return;
+        if (!ghostBondOutstanding[bondId]) return;
+
+        // Find an active offer from another actor
+        address buyer;
+        uint128 amount;
+        uint64 expiration;
+        uint256 maxFee;
+        uint256 nonce;
+        uint256 gNonce;
+        for (uint256 i; i < actors.length; ++i) {
+            address actor = actors[i];
+            if (actor == seller) continue;
+            if (
+                ghostOfferHasOrder[actor][bondId]
+                    && ghostOfferSignedNonce[actor][bondId] == marketplace.sOfferNonce(actor, bondId)
+                    && ghostOfferSignedGlobalNonce[actor][bondId] == marketplace.sGlobalOfferNonce(actor)
+            ) {
+                buyer = actor;
+                amount = ghostOfferAmount[actor][bondId];
+                expiration = ghostOfferExpiration[actor][bondId];
+                maxFee = ghostOfferMaxFee[actor][bondId];
+                nonce = ghostOfferSignedNonce[actor][bondId];
+                gNonce = ghostOfferSignedGlobalNonce[actor][bondId];
+                break;
+            }
+        }
+        if (buyer == address(0)) return;
+
+        // Pre-flight checks
+        // forge-lint-disable-next-line block-timestamp
+        if (block.timestamp > expiration) return;
+        if (weth.balanceOf(buyer) < amount) return;
+        if (weth.allowance(buyer, address(marketplace)) < amount) return;
+        if (!bondNft.isApprovedForAll(seller, address(marketplace))) return;
+
+        bytes memory sig = _signOffer(actorPk[buyer], bondId, amount, expiration, maxFee, nonce, gNonce);
+
+        vm.prank(seller);
+        marketplace.acceptSignedOffer(bondId, buyer, amount, expiration, maxFee, nonce, gNonce, sig);
+
+        ghostOfferNonce[buyer][bondId] = marketplace.sOfferNonce(buyer, bondId);
+        ghostBondOwner[bondId] = buyer;
+        ++ghostTotalOffersAccepted;
+    }
+
     function handlerWarpTime(uint256 seconds_) external {
         ++callsWarpTime;
         uint256 advance = bound(seconds_, 1, 30 days);
         vm.warp(block.timestamp + advance);
     }
 
-    /// @notice Make a bond non-outstanding (invalidates all trades for it)
     function handlerSetNonOutstanding(uint256 bondSeed) external {
         ++callsSetNonOutstanding;
         if (ghostMintedBondIds.length == 0) return;
@@ -429,25 +483,8 @@ contract CofferMarketplaceHandler is Test {
 
         coffer.setMaturityValue(bondId, 0);
         ghostBondOutstanding[bondId] = false;
-
-        // Remove listing (can't trade non-outstanding bond)
-        if (ghostHasActiveListing[bondId]) {
-            _removeListingFromGhost(bondId, _ghostListingIdx[bondId]);
-            ++ghostTotalListingsInvalidated;
-        }
-
-        // Remove all offers for this bond (backward iteration for safe swap-and-pop)
-        for (uint256 i = _ghostActiveOfferKeys.length; i > 0;) {
-            --i;
-            if (_ghostActiveOfferKeys[i].bondId == bondId) {
-                GhostOfferKey memory ok_ = _ghostActiveOfferKeys[i];
-                _removeOfferFromGhost(ok_.bondId, ok_.buyer, i);
-                ++ghostTotalOffersInvalidated;
-            }
-        }
     }
 
-    /// @notice Transfer an NFT outside the marketplace (creates stale listings)
     function handlerTransferNft(uint256 actorSeed, uint256 bondSeed) external {
         ++callsTransferNft;
         if (ghostMintedBondIds.length == 0) return;
@@ -461,36 +498,12 @@ contract CofferMarketplaceHandler is Test {
 
         vm.prank(currentOwner);
         bondNft.transferFrom(currentOwner, recipient, bondId);
-
         ghostBondOwner[bondId] = recipient;
-
-        // Remove stale listing (seller no longer owns NFT)
-        if (ghostHasActiveListing[bondId]) {
-            _removeListingFromGhost(bondId, _ghostListingIdx[bondId]);
-            ++ghostTotalListingsInvalidated;
-        }
     }
 
     // ═══════════════════════════════════════════════════════════════
     //                       View Accessors
     // ═══════════════════════════════════════════════════════════════
-
-    function getActiveListingCount() external view returns (uint256) {
-        return ghostActiveListingBondIds.length;
-    }
-
-    function getActiveListingBondIdAt(uint256 index) external view returns (uint256) {
-        return ghostActiveListingBondIds[index];
-    }
-
-    function getActiveOfferCount() external view returns (uint256) {
-        return _ghostActiveOfferKeys.length;
-    }
-
-    function getActiveOfferKeyAt(uint256 index) external view returns (uint256 bondId, address buyer) {
-        GhostOfferKey memory ok_ = _ghostActiveOfferKeys[index];
-        return (ok_.bondId, ok_.buyer);
-    }
 
     function getMintedBondCount() external view returns (uint256) {
         return ghostMintedBondIds.length;
@@ -512,41 +525,6 @@ contract CofferMarketplaceHandler is Test {
     //                      Internal Helpers
     // ═══════════════════════════════════════════════════════════════
 
-    function _offerKey(uint256 bondId, address buyer) internal pure returns (bytes32) {
-        return keccak256(abi.encode(bondId, buyer));
-    }
-
-    /// @dev Swap-and-pop removal for listings
-    function _removeListingFromGhost(uint256 bondId, uint256 idx) internal {
-        uint256 lastIdx = ghostActiveListingBondIds.length - 1;
-        if (idx != lastIdx) {
-            uint256 lastBondId = ghostActiveListingBondIds[lastIdx];
-            ghostActiveListingBondIds[idx] = lastBondId;
-            _ghostListingIdx[lastBondId] = idx;
-        }
-        ghostActiveListingBondIds.pop();
-        delete ghostHasActiveListing[bondId];
-        delete _ghostListingIdx[bondId];
-        delete ghostListingSeller[bondId];
-        delete ghostListingPrice[bondId];
-    }
-
-    /// @dev Swap-and-pop removal for offers
-    function _removeOfferFromGhost(uint256 bondId, address buyer, uint256 idx) internal {
-        bytes32 key = _offerKey(bondId, buyer);
-        uint256 lastIdx = _ghostActiveOfferKeys.length - 1;
-        if (idx != lastIdx) {
-            GhostOfferKey memory lastKey = _ghostActiveOfferKeys[lastIdx];
-            _ghostActiveOfferKeys[idx] = lastKey;
-            _ghostOfferIdx[_offerKey(lastKey.bondId, lastKey.buyer)] = idx;
-        }
-        _ghostActiveOfferKeys.pop();
-        delete ghostHasActiveOffer[key];
-        delete _ghostOfferIdx[key];
-        delete ghostOfferAmount[key];
-    }
-
-    /// @dev Find an outstanding bond owned by `owner`, starting from seed position
     function _findOwnedOutstandingBond(address owner, uint256 seed) internal view returns (uint256) {
         uint256 len = ghostMintedBondIds.length;
         if (len == 0) return 0;
@@ -558,7 +536,6 @@ contract CofferMarketplaceHandler is Test {
         return 0;
     }
 
-    /// @dev Find any outstanding bond, starting from seed position
     function _findOutstandingBond(uint256 seed) internal view returns (uint256) {
         uint256 len = ghostMintedBondIds.length;
         if (len == 0) return 0;
@@ -570,7 +547,88 @@ contract CofferMarketplaceHandler is Test {
         return 0;
     }
 
-    /// @dev Pick an actor that is not `exclude`
+    function _findRegisteredListing(address actor, uint256 seed) internal view returns (uint256) {
+        uint256 len = ghostMintedBondIds.length;
+        if (len == 0) return 0;
+        uint256 start = seed % len;
+        for (uint256 i; i < len; ++i) {
+            uint256 bondId = ghostMintedBondIds[(start + i) % len];
+            if (
+                ghostListingHasOrder[actor][bondId]
+                    && ghostListingSignedNonce[actor][bondId] == marketplace.sListingNonce(actor, bondId)
+                    && ghostListingSignedGlobalNonce[actor][bondId] == marketplace.sGlobalListingNonce(actor)
+            ) {
+                return bondId;
+            }
+        }
+        return 0;
+    }
+
+    function _findActiveListedBond(uint256 seed) internal view returns (uint256) {
+        uint256 len = ghostMintedBondIds.length;
+        if (len == 0) return 0;
+        uint256 start = seed % len;
+        for (uint256 i; i < len; ++i) {
+            uint256 bondId = ghostMintedBondIds[(start + i) % len];
+            for (uint256 j; j < actors.length; ++j) {
+                address actor = actors[j];
+                if (
+                    ghostListingSignedNonce[actor][bondId] > 0
+                        && ghostListingSignedNonce[actor][bondId] == marketplace.sListingNonce(actor, bondId)
+                        && ghostListingSignedGlobalNonce[actor][bondId] == marketplace.sGlobalListingNonce(actor)
+                ) {
+                    return bondId;
+                }
+            }
+        }
+        return 0;
+    }
+
+    function _findRegisteredOffer(address actor, uint256 seed) internal view returns (uint256) {
+        uint256 len = ghostMintedBondIds.length;
+        if (len == 0) return 0;
+        uint256 start = seed % len;
+        for (uint256 i; i < len; ++i) {
+            uint256 bondId = ghostMintedBondIds[(start + i) % len];
+            if (
+                ghostOfferHasOrder[actor][bondId]
+                    && ghostOfferSignedNonce[actor][bondId] == marketplace.sOfferNonce(actor, bondId)
+                    && ghostOfferSignedGlobalNonce[actor][bondId] == marketplace.sGlobalOfferNonce(actor)
+            ) {
+                return bondId;
+            }
+        }
+        return 0;
+    }
+
+    function _countActiveListings(address actor) internal view returns (uint256 count) {
+        uint256 len = ghostMintedBondIds.length;
+        for (uint256 i; i < len; ++i) {
+            uint256 bondId = ghostMintedBondIds[i];
+            if (
+                ghostListingHasOrder[actor][bondId]
+                    && ghostListingSignedNonce[actor][bondId] == marketplace.sListingNonce(actor, bondId)
+                    && ghostListingSignedGlobalNonce[actor][bondId] == marketplace.sGlobalListingNonce(actor)
+            ) {
+                ++count;
+            }
+        }
+    }
+
+    function _countActiveOffers(address actor) internal view returns (uint256 count) {
+        uint256 len = ghostMintedBondIds.length;
+        for (uint256 i; i < len; ++i) {
+            uint256 bondId = ghostMintedBondIds[i];
+            if (
+                ghostOfferHasOrder[actor][bondId]
+                    && ghostOfferSignedNonce[actor][bondId] == marketplace.sOfferNonce(actor, bondId)
+                    && ghostOfferSignedGlobalNonce[actor][bondId] == marketplace.sGlobalOfferNonce(actor)
+            ) {
+                ++count;
+            }
+        }
+    }
+
     function _pickActorExcluding(uint256 seed, address exclude) internal view returns (address) {
         uint256 len = actors.length;
         uint256 start = seed % len;
@@ -593,5 +651,59 @@ contract CofferMarketplaceHandler is Test {
             total += weth.balanceOf(actors[i]);
         }
         total += weth.balanceOf(address(marketplace));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //                      EIP-712 Helpers
+    // ═══════════════════════════════════════════════════════════════
+
+    function _domainSeparator() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                DOMAIN_TYPEHASH,
+                keccak256(bytes("CofferMarketplace")),
+                keccak256(bytes("2")),
+                block.chainid,
+                address(marketplace)
+            )
+        );
+    }
+
+    function _listingDigest(uint256 bId, uint128 pr, uint64 exp, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, exp, nonce, gNonce));
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+    }
+
+    function _offerDigest(uint256 bId, uint128 wAmt, uint64 exp, uint256 maxF, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, exp, maxF, nonce, gNonce));
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+    }
+
+    function _signListing(uint256 pk, uint256 bId, uint128 pr, uint64 exp, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 digest = _listingDigest(bId, pr, exp, nonce, gNonce);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _signOffer(uint256 pk, uint256 bId, uint128 wAmt, uint64 exp, uint256 maxF, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 digest = _offerDigest(bId, wAmt, exp, maxF, nonce, gNonce);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
     }
 }

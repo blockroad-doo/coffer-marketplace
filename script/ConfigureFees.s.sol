@@ -6,30 +6,23 @@ import {CofferMarketplace} from "../src/CofferMarketplace.sol";
 
 /// @title ConfigureFees
 /// @author Coffer
-/// @notice Configures per-function fees on the deployed CofferMarketplace
-/// @dev Values match the global defining_fees.md
+/// @notice Configures the profit-based fee basis points on the deployed CofferMarketplace
+/// @dev Only buySignedListing (ETH) and acceptSignedOffer (WETH) charge a fee. Signing and cancelling are free.
 contract ConfigureFees is Script {
     /// @notice Apply default fee tiers to the marketplace
     function run() external {
-        address marketplaceAddr = vm.envAddress("MARKETPLACE_ADDRESS");
+        address marketplaceAddr = vm.envAddress("HOODI_COFFER_MARKETPLACE_ADDRESS");
         CofferMarketplace marketplace = CofferMarketplace(payable(marketplaceAddr));
 
         vm.startBroadcast();
 
-        // ── Profit-Based Fees (0.00005 ETH/WETH + 8%) ──
-        marketplace.setFunctionFee(marketplace.buy.selector, 0.00005 ether, 800);
-        marketplace.setFunctionFee(marketplace.acceptOffer.selector, 0.00005 ether, 800);
-
-        // ── Fixed Fees (0.0005 ETH) ──
-        marketplace.setFunctionFee(marketplace.list.selector, 0.0005 ether, 0);
-        marketplace.setFunctionFee(marketplace.makeOffer.selector, 0.0005 ether, 0);
-
-        // ── App Usage Fees (0.00005 ETH) ──
-        marketplace.setFunctionFee(marketplace.cancelListing.selector, 0.00005 ether, 0);
-        marketplace.setFunctionFee(marketplace.cancelOffer.selector, 0.00005 ether, 0);
+        // Profit-based fees, in basis points, charged only on a completed trade.
+        // buySignedListing fee is paid in ETH, acceptSignedOffer fee is paid in WETH.
+        // Signing and cancelling are free (gas only).
+        marketplace.setFeeBps(800, 800);
 
         vm.stopBroadcast();
 
-        console.log("Marketplace fees configured at:", marketplaceAddr);
+        console.log("Fees set at:", marketplaceAddr);
     }
 }

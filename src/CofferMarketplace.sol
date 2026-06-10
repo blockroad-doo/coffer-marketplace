@@ -6,16 +6,24 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {SafeERC20, IERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import {ICofferBondNft} from "./interfaces/ICofferBondNft.sol";
 import {ICoffer} from "./interfaces/ICoffer.sol";
 import {IWETH} from "./interfaces/IWETH.sol";
 
 /// @title CofferMarketplace
 /// @author Coffer
-/// @notice Secondary marketplace for Coffer bond NFTs — listings (ETH) and offers (WETH).
-/// @notice Fees are charged on the six primary actions (list, cancelListing, buy, makeOffer,
-///         cancelOffer, acceptOffer). See defining_fees.md for the fee philosophy.
-contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
+/// @notice Secondary marketplace for Coffer bond NFTs using EIP-712 signed listings and offers.
+/// @notice Makers sign listings and offers off-chain at no cost and the orders live in an off-chain
+///         order book. A taker fills an order on-chain with buySignedListing or acceptSignedOffer,
+///         which verify the maker signature at that moment. Both EOA and ERC-1271 contract wallets,
+///         such as Safe and ERC-4337 accounts, are supported. Makers cancel on-chain by bumping a
+///         nonce, which is the only way to revoke an outstanding signature.
+/// @notice A profit-based percentage fee is charged only on a completed trade, on buySignedListing
+///         (paid in ETH) and on acceptSignedOffer (paid in WETH). See the Fee Flow section of the
+///         README for the fee philosophy.
+contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
 
     // ───── Errors ─────
@@ -23,49 +31,31 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
     error ZeroAddress();
     error ZeroPrice();
     error ZeroAmount();
-    error NotSeller();
-    error NotBuyer();
     error NotOwner();
-    error ListingNotFound();
-    error ListingExpired();
-    error OfferNotFound();
-    error OfferExpired();
-    error PriceMismatch();
-    error AmountMismatch();
     error BondNotOutstanding();
     error SellerNoLongerOwnsNft();
     error MarketplaceNotApproved();
     error ExpirationNotInFuture();
-    error CannotBuyOwnListing();
-    error InsufficientWethBalance();
-    error InsufficientWethAllowance();
     error InsufficientPayment();
-    error ArrayLengthMismatch();
-    error InsufficientFee();
     error FeeExceedsMax();
     error FeeTooHigh();
     error NothingToClaim();
     error NothingToClaimWeth();
+    error InvalidSignature();
+    error ListingRevoked();
+    error OfferRevoked();
+    error SameParty();
+    error RenounceOwnershipDisabled();
 
-    // ───── Structs ─────
+    // ───── EIP-712 Typehashes ─────
 
-    struct Listing {
-        address seller;
-        uint128 price;
-        uint64 expiration;
-    }
-
-    struct Offer {
-        address buyer; // 20 bytes ─┐ slot 0
-        uint64 expiration; //  8 bytes ─┘ (28B used, 4B padding)
-        uint128 wethAmount; // 16 bytes ─┐ slot 1
-        uint128 fee; // 16 bytes ─┘ (32B used) — WETH fee locked at makeOffer
-    }
-
-    struct FunctionFee {
-        uint128 fixedFee;
-        uint16 percentageBps;
-    }
+    /* solhint-disable gas-small-strings */
+    bytes32 private constant LISTING_TYPEHASH =
+        keccak256("Listing(uint256 bondId,uint128 price,uint64 expiration,uint256 nonce,uint256 globalNonce)");
+    bytes32 private constant OFFER_TYPEHASH = keccak256(
+        "Offer(uint256 bondId,uint128 wethAmount,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+    );
+    /* solhint-enable gas-small-strings */
 
     // ───── Constants ─────
 
@@ -81,52 +71,69 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
 
     /// @notice The address that receives collected fees on claim
     address public sFeeRecipient;
-    /// @notice Per-selector fee configuration
-    mapping(bytes4 selector => FunctionFee) public sFunctionFees;
+    /// @notice Profit-based fee in basis points charged on buySignedListing, paid in ETH
+    uint16 public sListingFeeBps;
+    /// @notice Profit-based fee in basis points charged on acceptSignedOffer, paid in WETH
+    uint16 public sOfferFeeBps;
 
-    /// @notice Active listings indexed by bond ID
-    mapping(uint256 bondId => Listing) public sListings;
-    /// @notice Active offers indexed by bond ID and buyer
-    mapping(uint256 bondId => mapping(address buyer => Offer)) public sOffers;
+    /// @notice Global listing nonce per seller, bumped by cancelAllListings
+    mapping(address account => uint256 nonce) public sGlobalListingNonce;
+    /// @notice Per-bond listing nonce per seller, bumped on fill or per-bond cancel
+    mapping(address account => mapping(uint256 bondId => uint256 nonce)) public sListingNonce;
+
+    /// @notice Global offer nonce per buyer, bumped by cancelAllOffers
+    mapping(address account => uint256 nonce) public sGlobalOfferNonce;
+    /// @notice Per-bond offer nonce per buyer, bumped on fill or per-bond cancel
+    mapping(address account => mapping(uint256 bondId => uint256 nonce)) public sOfferNonce;
 
     // ───── Events ─────
 
-    /// @notice Emitted when a bond NFT is listed for sale
-    /// @param bondId The bond token ID
+    /* solhint-disable gas-indexed-events */
+
+    /// @notice Emitted when a single listing is cancelled
     /// @param seller The seller address
-    /// @param price The listing price in wei
-    /// @param expiration The listing expiration timestamp
-    event Listed(uint256 indexed bondId, address indexed seller, uint128 indexed price, uint64 expiration);
-    /// @notice Emitted when a listing is cancelled
     /// @param bondId The bond token ID
+    /// @param newNonce The new per-bond nonce after cancellation
+    event ListingCancelled(address indexed seller, uint256 indexed bondId, uint256 newNonce);
+    /// @notice Emitted when multiple listings are cancelled in one tx
     /// @param seller The seller address
-    event ListingCancelled(uint256 indexed bondId, address indexed seller);
-    /// @notice Emitted when a listed bond NFT is purchased
+    /// @param bondIds The bond token IDs cancelled
+    /// @param newNonces The new per-bond nonces after cancellation
+    event ListingsCancelled(address indexed seller, uint256[] bondIds, uint256[] newNonces);
+    /// @notice Emitted when all listings are cancelled (global nonce bump)
+    /// @param seller The seller address
+    /// @param newGlobalNonce The new global nonce after cancellation
+    event AllListingsCancelled(address indexed seller, uint256 newGlobalNonce);
+    /// @notice Emitted when a listed bond NFT is purchased via signed listing
     /// @param bondId The bond token ID
     /// @param buyer The buyer address
     /// @param seller The seller address
-    /// @param price The purchase price in wei
+    /// @param price The listing price in wei
     /// @param fee The ETH fee collected by the marketplace
     event ListingPurchased(
         uint256 indexed bondId, address indexed buyer, address indexed seller, uint128 price, uint256 fee
     );
 
-    /// @notice Emitted when a WETH offer is made on a bond NFT
-    /// @param bondId The bond token ID
+    /// @notice Emitted when a single offer is cancelled
     /// @param buyer The buyer address
-    /// @param wethAmount The WETH offer amount
-    /// @param expiration The offer expiration timestamp
-    event OfferMade(uint256 indexed bondId, address indexed buyer, uint128 indexed wethAmount, uint64 expiration);
-    /// @notice Emitted when an offer is cancelled
     /// @param bondId The bond token ID
+    /// @param newNonce The new per-bond nonce after cancellation
+    event OfferCancelled(address indexed buyer, uint256 indexed bondId, uint256 newNonce);
+    /// @notice Emitted when multiple offers are cancelled in one tx
     /// @param buyer The buyer address
-    event OfferCancelled(uint256 indexed bondId, address indexed buyer);
-    /// @notice Emitted when a WETH offer is accepted by the NFT owner
+    /// @param bondIds The bond token IDs cancelled
+    /// @param newNonces The new per-bond nonces after cancellation
+    event OffersCancelled(address indexed buyer, uint256[] bondIds, uint256[] newNonces);
+    /// @notice Emitted when all offers are cancelled (global nonce bump)
+    /// @param buyer The buyer address
+    /// @param newGlobalNonce The new global nonce after cancellation
+    event AllOffersCancelled(address indexed buyer, uint256 newGlobalNonce);
+    /// @notice Emitted when a signed offer is accepted by the NFT owner
     /// @param bondId The bond token ID
-    /// @param buyer The buyer address
+    /// @param buyer The offerer address
     /// @param seller The seller address
     /// @param wethAmount The WETH amount of the accepted offer
-    /// @param fee The WETH fee collected by the marketplace (locked at makeOffer time)
+    /// @param fee The WETH fee collected by the marketplace
     event OfferAccepted(
         uint256 indexed bondId, address indexed buyer, address indexed seller, uint128 wethAmount, uint256 fee
     );
@@ -134,12 +141,10 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
     /// @notice Emitted when the fee recipient is updated
     /// @param recipient The new fee recipient address
     event FeeRecipientSet(address indexed recipient);
-    /* solhint-disable gas-indexed-events */
-    /// @notice Emitted when a function fee is configured
-    /// @param selector The function selector
-    /// @param fixedFee The fixed fee amount
-    /// @param percentageBps The percentage fee in basis points
-    event FunctionFeeSet(bytes4 indexed selector, uint128 fixedFee, uint16 percentageBps);
+    /// @notice Emitted when the profit-based fee basis points are configured
+    /// @param listingFeeBps The buySignedListing fee in basis points
+    /// @param offerFeeBps The acceptSignedOffer fee in basis points
+    event FeeBpsSet(uint16 listingFeeBps, uint16 offerFeeBps);
     /// @notice Emitted when ETH fees are claimed
     /// @param recipient The address that received the fees
     /// @param amount The amount of ETH claimed
@@ -148,11 +153,15 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
     /// @param recipient The address that received the fees
     /// @param amount The amount of WETH claimed
     event WethFeesClaimed(address indexed recipient, uint256 amount);
+
     /* solhint-enable gas-indexed-events */
 
     // ───── Constructor ─────
 
-    constructor(address _weth, address _cofferBondNft, address _owner, address _feeRecipient) Ownable(_owner) {
+    constructor(address _weth, address _cofferBondNft, address _owner, address _feeRecipient)
+        Ownable(_owner)
+        EIP712("CofferMarketplace", "2")
+    {
         require(_weth != address(0), ZeroAddress());
         require(_cofferBondNft != address(0), ZeroAddress());
         require(_feeRecipient != address(0), ZeroAddress());
@@ -164,6 +173,15 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
 
     // ───── Admin ─────
 
+    /// @notice Renouncing ownership is permanently disabled.
+    /// @dev Overrides Ownable.renounceOwnership to always revert, so the owner can never become
+    ///      address(0). That would otherwise permanently freeze fee configuration and lock accrued
+    ///      fees, since the contract is non-upgradeable. Transfer ownership via the two-step
+    ///      transferOwnership and acceptOwnership flow instead.
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceOwnershipDisabled();
+    }
+
     /// @notice Update the fee recipient address
     /// @param _recipient The new fee recipient address
     function setFeeRecipient(address _recipient) external onlyOwner {
@@ -172,17 +190,22 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
         emit FeeRecipientSet(_recipient);
     }
 
-    /// @notice Configure the fee for a specific function selector
-    /// @param _selector The function selector to configure
-    /// @param _fixedFee The fixed fee amount in wei
-    /// @param _percentageBps The percentage fee in basis points
-    function setFunctionFee(bytes4 _selector, uint128 _fixedFee, uint16 _percentageBps) external onlyOwner {
-        require(_percentageBps < BPS_DENOMINATOR, FeeTooHigh());
-        sFunctionFees[_selector] = FunctionFee({fixedFee: _fixedFee, percentageBps: _percentageBps});
-        emit FunctionFeeSet(_selector, _fixedFee, _percentageBps);
+    /// @notice Configure the profit-based fees, in basis points, for the two trade actions
+    /// @param _listingFeeBps The buySignedListing fee in basis points (paid in ETH)
+    /// @param _offerFeeBps The acceptSignedOffer fee in basis points (paid in WETH)
+    function setFeeBps(uint16 _listingFeeBps, uint16 _offerFeeBps) external onlyOwner {
+        require(_listingFeeBps < BPS_DENOMINATOR, FeeTooHigh());
+        require(_offerFeeBps < BPS_DENOMINATOR, FeeTooHigh());
+        sListingFeeBps = _listingFeeBps;
+        sOfferFeeBps = _offerFeeBps;
+        emit FeeBpsSet(_listingFeeBps, _offerFeeBps);
     }
 
-    /// @notice Claim accumulated ETH fees to the fee recipient
+    /// @notice Claim accumulated ETH fees to the fee recipient.
+    /// @dev Sweeps the entire ETH balance rather than a tracked fee ledger. The contract holds ETH
+    ///      only from the buySignedListing fee, so the balance is the accrued fee. Any ETH force-fed by
+    ///      selfdestruct or a coinbase payment is also paid to the fee recipient on claim. Per-trade
+    ///      fees are auditable off-chain from the ListingPurchased and FeesClaimed events.
     function claimFees() external onlyOwner {
         uint256 amount = address(this).balance;
         require(amount > 0, NothingToClaim());
@@ -191,7 +214,11 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
         emit FeesClaimed(recipient, amount);
     }
 
-    /// @notice Claim accumulated WETH fees to the fee recipient
+    /// @notice Claim accumulated WETH fees to the fee recipient.
+    /// @dev Sweeps the entire WETH balance rather than a tracked fee ledger. The contract holds WETH
+    ///      only from the acceptSignedOffer fee, so the balance is the accrued fee. Any WETH sent to
+    ///      the contract outside the fee flow is also paid to the fee recipient on claim. Per-trade
+    ///      fees are auditable off-chain from the OfferAccepted and WethFeesClaimed events.
     function claimWethFees() external onlyOwner {
         uint256 amount = IERC20(I_WETH).balanceOf(address(this));
         require(amount > 0, NothingToClaimWeth());
@@ -200,98 +227,202 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
         emit WethFeesClaimed(recipient, amount);
     }
 
+    // ───── Internal: Signature Verification ─────
+
+    /// @dev Verification accepts both EOA signatures (ECDSA) and ERC-1271 contract-wallet signatures
+    ///      through SignatureChecker, validated against the claimed signer. The signer is an explicit
+    ///      argument rather than recovered, because a contract wallet has no key to recover. Because
+    ///      ERC-1271 validity is revocable, buySignedListing and acceptSignedOffer verify at fill time.
+
+    function _verifyListingSig(
+        address _signer,
+        uint256 _bondId,
+        uint128 _price,
+        uint64 _expiration,
+        uint256 _nonce,
+        uint256 _globalNonce,
+        bytes calldata _sig
+    ) internal view {
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(abi.encode(LISTING_TYPEHASH, _bondId, _price, _expiration, _nonce, _globalNonce))
+        );
+        require(SignatureChecker.isValidSignatureNowCalldata(_signer, digest, _sig), InvalidSignature());
+    }
+
+    function _verifyOfferSig(
+        address _signer,
+        uint256 _bondId,
+        uint128 _wethAmount,
+        uint64 _expiration,
+        uint256 _maxFee,
+        uint256 _nonce,
+        uint256 _globalNonce,
+        bytes calldata _sig
+    ) internal view {
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(abi.encode(OFFER_TYPEHASH, _bondId, _wethAmount, _expiration, _maxFee, _nonce, _globalNonce))
+        );
+        require(SignatureChecker.isValidSignatureNowCalldata(_signer, digest, _sig), InvalidSignature());
+    }
+
     // ───── Listing Functions ─────
 
-    /// @notice List a bond NFT for sale
-    /// @param _bondId The bond token ID to list
-    /// @param _price The listing price in wei
-    /// @param _expiration The listing expiration timestamp
-    /// @param _maxFee The maximum ETH fee the caller is willing to pay for this action
-    function list(uint256 _bondId, uint128 _price, uint64 _expiration, uint256 _maxFee) external payable {
-        uint256 fee = _list(msg.sender, _bondId, _price, _expiration, _maxFee);
-        require(msg.value == fee, InsufficientFee());
-    }
-
-    /// @notice Cancel an active listing
+    /// @notice Cancel a single bond listing by bumping the per-bond nonce
+    /// @dev Advances the nonce by exactly one. If the seller has pre-signed a listing at the next
+    ///      nonce, that listing becomes fillable. Sign only at the current on-chain nonce.
     /// @param _bondId The bond token ID to cancel
-    /// @param _maxFee The maximum ETH fee the caller is willing to pay for this action
-    function cancelListing(uint256 _bondId, uint256 _maxFee) external payable {
-        uint256 fee = _cancelListing(msg.sender, _bondId, _maxFee);
-        require(msg.value == fee, InsufficientFee());
+    function cancelListing(uint256 _bondId) external {
+        uint256 newNonce = ++sListingNonce[msg.sender][_bondId];
+        emit ListingCancelled(msg.sender, _bondId, newNonce);
     }
 
-    /// @notice Purchase a listed bond NFT
-    /// @param _bondId The bond token ID to purchase
-    /// @param _expectedPrice The expected listing price to prevent front-running
-    /// @param _maxFee The maximum ETH fee the caller is willing to pay for this action
-    function buy(uint256 _bondId, uint128 _expectedPrice, uint256 _maxFee) external payable nonReentrant {
-        uint256 fee = _buy(msg.sender, _bondId, _expectedPrice, msg.value, _maxFee);
-        uint256 used = uint256(_expectedPrice) + fee;
-        // _buy already validated msg.value >= used; any overpay is refunded here
-        uint256 excess = msg.value - used;
-        if (excess > 0) {
-            require(_safeTransferETH(msg.sender, excess), InsufficientPayment());
+    /// @notice Cancel multiple bond listings in one transaction
+    /// @dev Passing the same bond id k times advances that bond's nonce by k atomically, which clears
+    ///      a queue of k pre-signed listings for that bond without affecting other bonds.
+    /// @param _bondIds The bond token IDs to cancel
+    function cancelListings(uint256[] calldata _bondIds) external {
+        uint256 length = _bondIds.length;
+        uint256[] memory newNonces = new uint256[](length);
+        for (uint256 i = 0; i < length; ++i) {
+            newNonces[i] = ++sListingNonce[msg.sender][_bondIds[i]];
         }
+        emit ListingsCancelled(msg.sender, _bondIds, newNonces);
+    }
+
+    /// @notice Cancel ALL active listings for the caller by bumping the global nonce
+    /// @dev Invalidates every outstanding listing signature across all bonds, the safe sweep when a
+    ///      seller is unsure what is still signed.
+    function cancelAllListings() external {
+        uint256 newGlobalNonce = ++sGlobalListingNonce[msg.sender];
+        emit AllListingsCancelled(msg.sender, newGlobalNonce);
+    }
+
+    /// @notice Purchase a bond via an EIP-712 signed listing
+    /// @param _bondId The bond token ID
+    /// @param _seller The seller address (signer of the listing)
+    /// @param _price The listing price from the signed message
+    /// @param _expiration The listing expiration from the signed message
+    /// @param _nonce The signed nonce (must equal current per-bond nonce)
+    /// @param _globalNonce The signed global nonce (must equal current global nonce)
+    /// @param _maxFee The maximum ETH buy fee the buyer is willing to pay
+    /// @param _sig The EIP-712 signature
+    function buySignedListing(
+        uint256 _bondId,
+        address _seller,
+        uint128 _price,
+        uint64 _expiration,
+        uint256 _nonce,
+        uint256 _globalNonce,
+        uint256 _maxFee,
+        bytes calldata _sig
+    ) external payable nonReentrant {
+        require(msg.sender != _seller, SameParty());
+        require(_price > 0, ZeroPrice());
+
+        require(_nonce == sListingNonce[_seller][_bondId], ListingRevoked());
+        require(_globalNonce == sGlobalListingNonce[_seller], ListingRevoked());
+
+        // slither-disable-next-line calls-loop
+        require(ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) == _seller, SellerNoLongerOwnsNft());
+        // slither-disable-next-line calls-loop
+        // solhint-disable-next-line max-line-length
+        require(ICofferBondNft(I_COFFER_BOND_NFT).isApprovedForAll(_seller, address(this)), MarketplaceNotApproved());
+
+        _validateTrade(_bondId, _expiration);
+
+        _verifyListingSig(_seller, _bondId, _price, _expiration, _nonce, _globalNonce, _sig);
+
+        uint128 maturityValue = _getBondMaturity(_bondId);
+        uint256 profit = maturityValue > _price ? uint256(maturityValue) - uint256(_price) : 0;
+        uint256 fee = _feeOnProfit(profit, sListingFeeBps, _maxFee);
+
+        uint256 total = uint256(_price) + fee;
+        // solhint-disable-next-line gas-strict-inequalities
+        require(msg.value >= total, InsufficientPayment());
+
+        ++sListingNonce[_seller][_bondId];
+
+        _executeBuy(_bondId, _seller, _price, fee, msg.value - total);
     }
 
     // ───── Offer Functions ─────
 
-    /// @notice Make a WETH offer on a bond NFT
-    /// @param _bondId The bond token ID to make an offer on
-    /// @param _wethAmount The WETH amount to offer
-    /// @param _expiration The offer expiration timestamp
-    /// @param _maxFee The maximum ETH fee the caller is willing to pay for this action
-    function makeOffer(uint256 _bondId, uint128 _wethAmount, uint64 _expiration, uint256 _maxFee) external payable {
-        uint256 fee = _makeOffer(msg.sender, _bondId, _wethAmount, _expiration, _maxFee);
-        require(msg.value == fee, InsufficientFee());
-    }
-
-    /// @notice Cancel an active offer
-    /// @param _bondId The bond token ID to cancel the offer for
-    /// @param _maxFee The maximum ETH fee the caller is willing to pay for this action
-    function cancelOffer(uint256 _bondId, uint256 _maxFee) external payable {
-        uint256 fee = _cancelOffer(msg.sender, _bondId, _maxFee);
-        require(msg.value == fee, InsufficientFee());
-    }
-
-    /// @notice Accept a WETH offer on a bond NFT you own
-    /// @dev The WETH fee was locked into the Offer struct at makeOffer time and is pulled from the offerer.
+    /// @notice Cancel a single offer by bumping the per-bond nonce
+    /// @dev Advances the nonce by exactly one. If the buyer has pre-signed an offer at the next
+    ///      nonce, that offer becomes fillable. Sign only at the current on-chain nonce.
     /// @param _bondId The bond token ID
-    /// @param _buyer The address of the offer maker
-    /// @param _expectedAmount The expected WETH amount to prevent front-running
-    function acceptOffer(uint256 _bondId, address _buyer, uint128 _expectedAmount) external nonReentrant {
-        _acceptOffer(msg.sender, _bondId, _buyer, _expectedAmount);
+    function cancelOffer(uint256 _bondId) external {
+        uint256 newNonce = ++sOfferNonce[msg.sender][_bondId];
+        emit OfferCancelled(msg.sender, _bondId, newNonce);
+    }
+
+    /// @notice Cancel multiple offers in one transaction
+    /// @dev Passing the same bond id k times advances that bond's nonce by k atomically, which clears
+    ///      a queue of k pre-signed offers for that bond without affecting other bonds.
+    /// @param _bondIds The bond token IDs to cancel
+    function cancelOffers(uint256[] calldata _bondIds) external {
+        uint256 length = _bondIds.length;
+        uint256[] memory newNonces = new uint256[](length);
+        for (uint256 i = 0; i < length; ++i) {
+            newNonces[i] = ++sOfferNonce[msg.sender][_bondIds[i]];
+        }
+        emit OffersCancelled(msg.sender, _bondIds, newNonces);
+    }
+
+    /// @notice Cancel ALL active offers for the caller by bumping the global nonce
+    /// @dev Invalidates every outstanding offer signature across all bonds, the safe sweep when a
+    ///      buyer is unsure what is still signed.
+    function cancelAllOffers() external {
+        uint256 newGlobalNonce = ++sGlobalOfferNonce[msg.sender];
+        emit AllOffersCancelled(msg.sender, newGlobalNonce);
+    }
+
+    /// @notice Accept an EIP-712 signed offer. The offerer pays the WETH fee computed from
+    ///         current config. Reverts with FeeExceedsMax if that fee exceeds the signed maxOfferFee.
+    /// @param _bondId The bond token ID
+    /// @param _buyer The offerer address (signer of the offer)
+    /// @param _wethAmount The WETH offer amount from the signed message
+    /// @param _expiration The offer expiration from the signed message
+    /// @param _maxOfferFee The maximum WETH fee signed by the offerer
+    /// @param _nonce The signed nonce (must equal current per-bond nonce)
+    /// @param _globalNonce The signed global nonce (must equal current global nonce)
+    /// @param _sig The EIP-712 signature
+    function acceptSignedOffer(
+        uint256 _bondId,
+        address _buyer,
+        uint128 _wethAmount,
+        uint64 _expiration,
+        uint256 _maxOfferFee,
+        uint256 _nonce,
+        uint256 _globalNonce,
+        bytes calldata _sig
+    ) external nonReentrant {
+        require(msg.sender != _buyer, SameParty());
+        require(_wethAmount > 0, ZeroAmount());
+
+        require(_nonce == sOfferNonce[_buyer][_bondId], OfferRevoked());
+        require(_globalNonce == sGlobalOfferNonce[_buyer], OfferRevoked());
+
+        // slither-disable-next-line calls-loop
+        require(ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) == msg.sender, NotOwner());
+        // slither-disable-next-line calls-loop
+        // solhint-disable-next-line max-line-length
+        require(ICofferBondNft(I_COFFER_BOND_NFT).isApprovedForAll(msg.sender, address(this)), MarketplaceNotApproved());
+
+        _validateTrade(_bondId, _expiration);
+
+        _verifyOfferSig(_buyer, _bondId, _wethAmount, _expiration, _maxOfferFee, _nonce, _globalNonce, _sig);
+
+        uint128 maturityValue = _getBondMaturity(_bondId);
+        uint256 revenue = maturityValue > _wethAmount ? uint256(maturityValue) - uint256(_wethAmount) : 0;
+        uint256 fee = _feeOnProfit(revenue, sOfferFeeBps, _maxOfferFee);
+
+        ++sOfferNonce[_buyer][_bondId];
+
+        _executeAccept(_bondId, _buyer, _wethAmount, fee);
     }
 
     // ───── View Functions ─────
-
-    /// @notice Check if a listing is currently valid
-    /// @param _bondId The bond token ID
-    /// @return Whether the listing is valid
-    function isListingValid(uint256 _bondId) external view returns (bool) {
-        Listing memory listing = sListings[_bondId];
-        if (listing.seller == address(0)) return false;
-        // forge-lint-disable-next-line block-timestamp
-        if (block.timestamp > listing.expiration) return false;
-        if (ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) != listing.seller) return false;
-        if (!_isBondOutstanding(_bondId)) return false;
-        return true;
-    }
-
-    /// @notice Check if an offer is currently valid (balance and allowance must cover amount + locked fee)
-    /// @param _bondId The bond token ID
-    /// @param _buyer The address of the offer maker
-    /// @return Whether the offer is valid
-    function isOfferValid(uint256 _bondId, address _buyer) external view returns (bool) {
-        Offer memory o = sOffers[_bondId][_buyer];
-        if (o.buyer == address(0)) return false;
-        // forge-lint-disable-next-line block-timestamp
-        if (block.timestamp > o.expiration) return false;
-        uint256 totalWeth = uint256(o.wethAmount) + uint256(o.fee);
-        if (IWETH(I_WETH).balanceOf(_buyer) < totalWeth) return false;
-        if (IWETH(I_WETH).allowance(_buyer, address(this)) < totalWeth) return false;
-        return true;
-    }
 
     /// @notice Get bond data from the associated Coffer
     /// @param _bondId The bond token ID
@@ -311,220 +442,18 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
 
     // ───── Internal: Fee Math ─────
 
-    /// @notice Compute a profit-based fee: fixedFee + profit * bps / BPS_DENOMINATOR.
-    /// @dev Returns zero if the selector has no configured fee.
-    /// @param _selector Function selector to look up fee config
-    /// @param _profit The profit value to calculate percentage on
-    /// @param _maxFee Maximum fee the caller is willing to pay
-    /// @return fee Total calculated fee
-    function _calculateFeeOnProfit(bytes4 _selector, uint256 _profit, uint256 _maxFee)
-        internal
-        view
-        returns (uint256 fee)
-    {
-        FunctionFee memory ff = sFunctionFees[_selector];
-        if (ff.fixedFee == 0 && ff.percentageBps == 0) return 0;
-        uint256 percentageFee = (_profit * uint256(ff.percentageBps)) / BPS_DENOMINATOR;
-        fee = uint256(ff.fixedFee) + percentageFee;
+    /// @notice Compute a profit-based fee, profit * bps / BPS_DENOMINATOR, capped at the caller maximum.
+    /// @param _profit The profit the percentage is applied to
+    /// @param _bps The fee in basis points
+    /// @param _maxFee The maximum fee the caller is willing to pay
+    /// @return fee The calculated fee
+    function _feeOnProfit(uint256 _profit, uint16 _bps, uint256 _maxFee) internal pure returns (uint256 fee) {
+        fee = (_profit * uint256(_bps)) / BPS_DENOMINATOR;
         // solhint-disable-next-line gas-strict-inequalities
         require(fee <= _maxFee, FeeExceedsMax());
     }
 
-    /// @notice Compute a flat fee: fixedFee only (percentage ignored).
-    /// @dev Returns zero if the selector has no configured fixed fee.
-    /// @param _selector Function selector to look up fee config
-    /// @param _maxFee Maximum fee the caller is willing to pay
-    /// @return fee Total calculated fee
-    function _calculateFlatFee(bytes4 _selector, uint256 _maxFee) internal view returns (uint256 fee) {
-        FunctionFee memory ff = sFunctionFees[_selector];
-        if (ff.fixedFee == 0) return 0;
-        fee = uint256(ff.fixedFee);
-        // solhint-disable-next-line gas-strict-inequalities
-        require(fee <= _maxFee, FeeExceedsMax());
-    }
-
-    // ───── Internal: Listing Logic ─────
-
-    function _list(address _seller, uint256 _bondId, uint128 _price, uint64 _expiration, uint256 _maxFee)
-        internal
-        returns (uint256 fee)
-    {
-        require(_price > 0, ZeroPrice());
-        // forge-lint-disable-next-line block-timestamp
-        require(_expiration > block.timestamp, ExpirationNotInFuture());
-        // slither-disable-next-line calls-loop
-        require(ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) == _seller, NotOwner());
-        require(_isBondOutstanding(_bondId), BondNotOutstanding());
-        // slither-disable-next-line calls-loop
-        require(ICofferBondNft(I_COFFER_BOND_NFT).isApprovedForAll(_seller, address(this)), MarketplaceNotApproved());
-
-        fee = _calculateFlatFee(this.list.selector, _maxFee);
-
-        // Emit cancellation if overwriting a stale listing from a different seller
-        Listing memory existing = sListings[_bondId];
-        if (existing.seller != address(0) && existing.seller != _seller) {
-            emit ListingCancelled(_bondId, existing.seller);
-        }
-
-        // slither-disable-next-line reentrancy-no-eth
-        sListings[_bondId] = Listing({seller: _seller, price: _price, expiration: _expiration});
-
-        emit Listed(_bondId, _seller, _price, _expiration);
-    }
-
-    function _cancelListing(address _caller, uint256 _bondId, uint256 _maxFee) internal returns (uint256 fee) {
-        Listing memory listing = sListings[_bondId];
-        require(listing.seller == _caller, NotSeller());
-
-        fee = _calculateFlatFee(this.cancelListing.selector, _maxFee);
-
-        // slither-disable-next-line costly-loop
-        delete sListings[_bondId];
-        emit ListingCancelled(_bondId, _caller);
-    }
-
-    function _buy(address _buyer, uint256 _bondId, uint128 _expectedPrice, uint256 _payment, uint256 _maxFee)
-        internal
-        returns (uint256 fee)
-    {
-        Listing memory listing = sListings[_bondId];
-        require(listing.seller != address(0), ListingNotFound());
-        // solhint-disable-next-line gas-strict-inequalities
-        // forge-lint-disable-next-line block-timestamp
-        require(block.timestamp <= listing.expiration, ListingExpired());
-        require(_isBondOutstanding(_bondId), BondNotOutstanding());
-
-        // Check seller still owns NFT
-        // slither-disable-next-line calls-loop
-        require(ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) == listing.seller, SellerNoLongerOwnsNft());
-
-        require(listing.price == _expectedPrice, PriceMismatch());
-        require(_buyer != listing.seller, CannotBuyOwnListing());
-
-        // Compute profit-based fee (buyer's gain = maturityValue - listingPrice)
-        uint128 maturityValue = _getBondMaturity(_bondId);
-        uint256 profit = maturityValue > listing.price ? uint256(maturityValue) - uint256(listing.price) : 0;
-        fee = _calculateFeeOnProfit(this.buy.selector, profit, _maxFee);
-
-        // solhint-disable-next-line gas-strict-inequalities
-        require(_payment >= uint256(listing.price) + fee, InsufficientPayment());
-
-        // CEI: delete listing before external calls
-        // slither-disable-next-line reentrancy-no-eth,costly-loop
-        delete sListings[_bondId];
-
-        // Transfer NFT from seller to buyer (seller approved marketplace in _list)
-        // slither-disable-next-line arbitrary-send-erc20,calls-loop
-        ICofferBondNft(I_COFFER_BOND_NFT).safeTransferFrom(listing.seller, _buyer, _bondId);
-
-        // Send price to seller — fall back to WETH if seller rejects ETH
-        // slither-disable-next-line arbitrary-send-eth,calls-loop
-        bool okSeller = _safeTransferETH(listing.seller, listing.price);
-        if (!okSeller) {
-            IWETH(I_WETH).deposit{value: listing.price}();
-            IERC20(I_WETH).safeTransfer(listing.seller, listing.price);
-        }
-
-        // Fee stays in contract balance; caller (external or batch) handles any buyer-side refund
-        emit ListingPurchased(_bondId, _buyer, listing.seller, listing.price, fee);
-    }
-
-    // ───── Internal: Offer Logic ─────
-
-    function _makeOffer(address _buyer, uint256 _bondId, uint128 _wethAmount, uint64 _expiration, uint256 _maxFee)
-        internal
-        returns (uint256 fee)
-    {
-        require(_wethAmount > 0, ZeroAmount());
-        // forge-lint-disable-next-line block-timestamp
-        require(_expiration > block.timestamp, ExpirationNotInFuture());
-        require(_isBondOutstanding(_bondId), BondNotOutstanding());
-
-        // App-usage flat fee (paid in ETH right now)
-        fee = _calculateFlatFee(this.makeOffer.selector, _maxFee);
-
-        // Lock the WETH fee for acceptOffer using CURRENT fee config (revenue-based on offerer profit)
-        uint128 maturityValue = _getBondMaturity(_bondId);
-        uint256 revenue = maturityValue > _wethAmount ? uint256(maturityValue) - uint256(_wethAmount) : 0;
-        uint256 lockedFeeFull = _calculateFeeOnProfit(this.acceptOffer.selector, revenue, type(uint256).max);
-        // solhint-disable-next-line gas-strict-inequalities
-        require(lockedFeeFull <= type(uint128).max, FeeExceedsMax());
-        // forge-lint: disable-next-line(unsafe-typecast)
-        uint128 lockedFee = uint128(lockedFeeFull);
-
-        uint256 totalWeth = uint256(_wethAmount) + uint256(lockedFee);
-        // slither-disable-next-line calls-loop
-        // solhint-disable-next-line gas-strict-inequalities
-        require(IWETH(I_WETH).balanceOf(_buyer) >= totalWeth, InsufficientWethBalance());
-        // slither-disable-next-line calls-loop
-        // solhint-disable-next-line gas-strict-inequalities
-        require(IWETH(I_WETH).allowance(_buyer, address(this)) >= totalWeth, InsufficientWethAllowance());
-
-        // slither-disable-next-line reentrancy-no-eth
-        sOffers[_bondId][_buyer] =
-            Offer({buyer: _buyer, expiration: _expiration, wethAmount: _wethAmount, fee: lockedFee});
-
-        emit OfferMade(_bondId, _buyer, _wethAmount, _expiration);
-    }
-
-    function _cancelOffer(address _caller, uint256 _bondId, uint256 _maxFee) internal returns (uint256 fee) {
-        Offer memory o = sOffers[_bondId][_caller];
-        require(o.buyer == _caller, NotBuyer());
-
-        fee = _calculateFlatFee(this.cancelOffer.selector, _maxFee);
-
-        delete sOffers[_bondId][_caller];
-        emit OfferCancelled(_bondId, _caller);
-    }
-
-    function _acceptOffer(address _seller, uint256 _bondId, address _buyer, uint128 _expectedAmount)
-        internal
-        returns (uint256 fee)
-    {
-        Offer memory o = sOffers[_bondId][_buyer];
-        require(o.buyer != address(0), OfferNotFound());
-        // solhint-disable-next-line gas-strict-inequalities
-        // forge-lint-disable-next-line block-timestamp
-        require(block.timestamp <= o.expiration, OfferExpired());
-        require(_isBondOutstanding(_bondId), BondNotOutstanding());
-        // slither-disable-next-line calls-loop
-        require(ICofferBondNft(I_COFFER_BOND_NFT).ownerOf(_bondId) == _seller, NotOwner());
-        require(_buyer != _seller, CannotBuyOwnListing());
-        // slither-disable-next-line calls-loop
-        require(ICofferBondNft(I_COFFER_BOND_NFT).isApprovedForAll(_seller, address(this)), MarketplaceNotApproved());
-        require(o.wethAmount == _expectedAmount, AmountMismatch());
-
-        fee = uint256(o.fee);
-        uint256 totalWeth = uint256(o.wethAmount) + fee;
-
-        // Verify buyer still has sufficient WETH for amount + locked fee
-        // slither-disable-next-line calls-loop
-        // solhint-disable-next-line gas-strict-inequalities
-        require(IWETH(I_WETH).balanceOf(_buyer) >= totalWeth, InsufficientWethBalance());
-        // slither-disable-next-line calls-loop
-        // solhint-disable-next-line gas-strict-inequalities
-        require(IWETH(I_WETH).allowance(_buyer, address(this)) >= totalWeth, InsufficientWethAllowance());
-
-        // CEI: delete offer before external calls
-        delete sOffers[_bondId][_buyer];
-
-        // Transfer WETH offer amount from buyer to seller
-        // slither-disable-next-line arbitrary-send-erc20
-        IERC20(I_WETH).safeTransferFrom(_buyer, _seller, o.wethAmount);
-        // Transfer WETH fee from buyer to this contract
-        if (fee > 0) {
-            // slither-disable-next-line arbitrary-send-erc20
-            IERC20(I_WETH).safeTransferFrom(_buyer, address(this), fee);
-        }
-
-        // Transfer NFT from seller to buyer
-        // slither-disable-next-line calls-loop
-        ICofferBondNft(I_COFFER_BOND_NFT).safeTransferFrom(_seller, _buyer, _bondId);
-
-        emit OfferAccepted(_bondId, _buyer, _seller, o.wethAmount, fee);
-    }
-
-    // ───── Internal: Helpers ─────
+    // ───── Internal: Bond Helpers ─────
 
     /// @notice Read the maturity value of a bond from its associated Coffer
     /// @param _bondId The bond token ID
@@ -541,6 +470,70 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard {
     /// @return Whether the bond is outstanding
     function _isBondOutstanding(uint256 _bondId) internal view returns (bool) {
         return _getBondMaturity(_bondId) != 0;
+    }
+
+    // ───── Internal: Trade Execution ─────
+
+    /// @notice Shared pre-trade checks: expiry and bond liquidity.
+    /// @param _bondId The bond token ID
+    /// @param _expiration The expiration timestamp
+    function _validateTrade(uint256 _bondId, uint64 _expiration) internal view {
+        // forge-lint-disable-next-line block-timestamp
+        // solhint-disable-next-line gas-strict-inequalities
+        require(block.timestamp <= _expiration, ExpirationNotInFuture());
+        require(_isBondOutstanding(_bondId), BondNotOutstanding());
+    }
+
+    /// @notice Finalise a signed-listing purchase: NFT, ETH/WETH, refund, event.
+    /// @param _bondId The bond token ID
+    /// @param _seller The seller address
+    /// @param _price The listing price in wei
+    /// @param _fee The ETH fee collected
+    /// @param _excess Excess ETH to refund to buyer
+    function _executeBuy(uint256 _bondId, address _seller, uint128 _price, uint256 _fee, uint256 _excess) internal {
+        // slither-disable-next-line arbitrary-send-erc20,calls-loop
+        ICofferBondNft(I_COFFER_BOND_NFT).safeTransferFrom(_seller, msg.sender, _bondId);
+
+        // slither-disable-next-line arbitrary-send-eth,calls-loop
+        bool okSeller = _safeTransferETH(_seller, _price);
+        if (!okSeller) {
+            IWETH(I_WETH).deposit{value: _price}();
+            IERC20(I_WETH).safeTransfer(_seller, _price);
+        }
+
+        if (_excess > 0) {
+            // slither-disable-next-line arbitrary-send-eth
+            require(_safeTransferETH(msg.sender, _excess), InsufficientPayment());
+        }
+
+        emit ListingPurchased(_bondId, msg.sender, _seller, _price, _fee);
+    }
+
+    /// @notice Finalise a signed-offer acceptance: WETH checks, transfers, NFT, event.
+    /// @param _bondId The bond token ID
+    /// @param _buyer The offerer address
+    /// @param _wethAmount The WETH offer amount
+    /// @param _fee The WETH fee collected
+    function _executeAccept(uint256 _bondId, address _buyer, uint128 _wethAmount, uint256 _fee) internal {
+        uint256 totalWeth = uint256(_wethAmount) + _fee;
+        // slither-disable-next-line calls-loop
+        // solhint-disable-next-line gas-strict-inequalities
+        require(IWETH(I_WETH).balanceOf(_buyer) >= totalWeth, InsufficientPayment());
+        // slither-disable-next-line calls-loop
+        // solhint-disable-next-line gas-strict-inequalities
+        require(IWETH(I_WETH).allowance(_buyer, address(this)) >= totalWeth, InsufficientPayment());
+
+        // slither-disable-next-line arbitrary-send-erc20
+        IERC20(I_WETH).safeTransferFrom(_buyer, msg.sender, _wethAmount);
+        if (_fee > 0) {
+            // slither-disable-next-line arbitrary-send-erc20
+            IERC20(I_WETH).safeTransferFrom(_buyer, address(this), _fee);
+        }
+
+        // slither-disable-next-line calls-loop
+        ICofferBondNft(I_COFFER_BOND_NFT).safeTransferFrom(msg.sender, _buyer, _bondId);
+
+        emit OfferAccepted(_bondId, _buyer, msg.sender, _wethAmount, _fee);
     }
 
     /// @notice Transfer ETH without copying returndata, preventing returndata bomb gas griefing.

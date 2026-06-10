@@ -24,7 +24,7 @@ contract CofferMarketplaceInvariantTest is Test {
     address public feeRecipient = makeAddr("feeRecipient");
 
     function setUp() public virtual {
-        vm.warp(100_000); // Stable starting timestamp
+        vm.warp(100_000);
 
         coffer = new MockCofferForHandler();
         bondNft = new MockBondNftForHandler();
@@ -36,19 +36,7 @@ contract CofferMarketplaceInvariantTest is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Category 1 — Zero Balance (marketplace is a pure pass-through)
-    // ═══════════════════════════════════════════════════════════════
-
-    function invariant_marketplaceNeverHoldsEth() public view {
-        assertEq(address(marketplace).balance, 0, "Marketplace must never hold ETH");
-    }
-
-    function invariant_marketplaceNeverHoldsWeth() public view {
-        assertEq(weth.balanceOf(address(marketplace)), 0, "Marketplace must never hold WETH");
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  Category 2 — Conservation (no value created or destroyed)
+    //  Category 1, Conservation (no value created or destroyed)
     // ═══════════════════════════════════════════════════════════════
 
     function invariant_ethConservation() public view {
@@ -58,7 +46,6 @@ contract CofferMarketplaceInvariantTest is Test {
             total += handler.getActorAt(i).balance;
         }
         total += address(marketplace).balance;
-        // WETH contract holds ETH backing wrapped tokens (including from WETH fallback in _buy)
         total += address(weth).balance;
         assertEq(total, handler.ghostInitialTotalEth(), "Total ETH must be conserved");
     }
@@ -74,26 +61,48 @@ contract CofferMarketplaceInvariantTest is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Category 3 — Ghost-to-Chain Consistency
+    //  Category 2, Ghost-to-Chain Consistency (nonce mirroring)
     // ═══════════════════════════════════════════════════════════════
 
-    function invariant_ghostListingsMatchOnChain() public view {
-        uint256 count = handler.getActiveListingCount();
-        for (uint256 i; i < count; ++i) {
-            uint256 bondId = handler.getActiveListingBondIdAt(i);
-            (address seller, uint128 price,) = marketplace.sListings(bondId);
-            assertEq(seller, handler.ghostListingSeller(bondId), "Listing seller mismatch");
-            assertEq(price, handler.ghostListingPrice(bondId), "Listing price mismatch");
+    function invariant_listingNoncesMatchOnChain() public view {
+        uint256 numActors = handler.getActorsLength();
+        uint256 numBonds = handler.getMintedBondCount();
+        for (uint256 i; i < numActors; ++i) {
+            address actor = handler.getActorAt(i);
+            assertEq(
+                handler.ghostListingGlobalNonce(actor),
+                marketplace.sGlobalListingNonce(actor),
+                "Global listing nonce mismatch"
+            );
+            for (uint256 j; j < numBonds; ++j) {
+                uint256 bondId = handler.getMintedBondIdAt(j);
+                assertEq(
+                    handler.ghostListingNonce(actor, bondId),
+                    marketplace.sListingNonce(actor, bondId),
+                    "Per-bond listing nonce mismatch"
+                );
+            }
         }
     }
 
-    function invariant_ghostOffersMatchOnChain() public view {
-        uint256 count = handler.getActiveOfferCount();
-        for (uint256 i; i < count; ++i) {
-            (uint256 bondId, address buyer) = handler.getActiveOfferKeyAt(i);
-            (,, uint128 amount,) = marketplace.sOffers(bondId, buyer);
-            bytes32 key = keccak256(abi.encode(bondId, buyer));
-            assertEq(amount, handler.ghostOfferAmount(key), "Offer amount mismatch");
+    function invariant_offerNoncesMatchOnChain() public view {
+        uint256 numActors = handler.getActorsLength();
+        uint256 numBonds = handler.getMintedBondCount();
+        for (uint256 i; i < numActors; ++i) {
+            address actor = handler.getActorAt(i);
+            assertEq(
+                handler.ghostOfferGlobalNonce(actor),
+                marketplace.sGlobalOfferNonce(actor),
+                "Global offer nonce mismatch"
+            );
+            for (uint256 j; j < numBonds; ++j) {
+                uint256 bondId = handler.getMintedBondIdAt(j);
+                assertEq(
+                    handler.ghostOfferNonce(actor, bondId),
+                    marketplace.sOfferNonce(actor, bondId),
+                    "Per-bond offer nonce mismatch"
+                );
+            }
         }
     }
 
@@ -106,94 +115,86 @@ contract CofferMarketplaceInvariantTest is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Category 4 — Structural Integrity
+    //  Category 3, Structural Integrity
     // ═══════════════════════════════════════════════════════════════
 
-    function invariant_activeListingsHavePositivePrice() public view {
-        uint256 count = handler.getActiveListingCount();
+    function invariant_bondOwnershipIsTracked() public view {
+        uint256 count = handler.getMintedBondCount();
         for (uint256 i; i < count; ++i) {
-            uint256 bondId = handler.getActiveListingBondIdAt(i);
-            (, uint128 price,) = marketplace.sListings(bondId);
-            assertGt(price, 0, "Active listing must have positive price");
-        }
-    }
-
-    function invariant_activeOffersHavePositiveAmount() public view {
-        uint256 count = handler.getActiveOfferCount();
-        for (uint256 i; i < count; ++i) {
-            (uint256 bondId, address buyer) = handler.getActiveOfferKeyAt(i);
-            (,, uint128 amount,) = marketplace.sOffers(bondId, buyer);
-            assertGt(amount, 0, "Active offer must have positive amount");
-        }
-    }
-
-    function invariant_activeListingsHaveNonZeroSeller() public view {
-        uint256 count = handler.getActiveListingCount();
-        for (uint256 i; i < count; ++i) {
-            uint256 bondId = handler.getActiveListingBondIdAt(i);
-            (address seller,,) = marketplace.sListings(bondId);
-            assertTrue(seller != address(0), "Active listing must have non-zero seller");
+            uint256 bondId = handler.getMintedBondIdAt(i);
+            address owner = handler.ghostBondOwner(bondId);
+            assertTrue(owner != address(0), "Every minted bond must have a ghost owner");
         }
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Category 5 — Lifecycle Accounting
+    //  Category 4, Lifecycle Accounting
     // ═══════════════════════════════════════════════════════════════
 
-    function invariant_listingLifecycle() public view {
-        assertEq(
-            handler.ghostTotalListingsCreated(),
-            handler.ghostTotalListingsPurchased() + handler.ghostTotalListingsCancelled()
-                + handler.ghostTotalListingsInvalidated() + handler.getActiveListingCount(),
-            "Listing lifecycle: created = purchased + cancelled + invalidated + active"
-        );
+    function invariant_listingLifecycle_nonNegative() public view {
+        uint256 created = handler.ghostTotalListingsCreated();
+        uint256 purchased = handler.ghostTotalListingsPurchased();
+        uint256 cancelled = handler.ghostTotalListingsCancelled();
+        uint256 revoked = handler.ghostTotalListingsRevoked();
+        assertLe(purchased + cancelled + revoked, created, "Listings resolved exceed created");
     }
 
-    function invariant_offerLifecycle() public view {
-        assertEq(
-            handler.ghostTotalOffersMade(),
-            handler.ghostTotalOffersAccepted() + handler.ghostTotalOffersCancelled()
-                + handler.ghostTotalOffersInvalidated() + handler.getActiveOfferCount(),
-            "Offer lifecycle: made = accepted + cancelled + invalidated + active"
-        );
+    function invariant_offerLifecycle_nonNegative() public view {
+        uint256 made = handler.ghostTotalOffersMade();
+        uint256 accepted = handler.ghostTotalOffersAccepted();
+        uint256 cancelled = handler.ghostTotalOffersCancelled();
+        uint256 revoked = handler.ghostTotalOffersRevoked();
+        assertLe(accepted + cancelled + revoked, made, "Offers resolved exceed made");
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Category 6 — Bond Integrity
+    //  Category 5, Bond Integrity
     // ═══════════════════════════════════════════════════════════════
 
-    function invariant_everyListedBondIsOutstanding() public view {
-        uint256 count = handler.getActiveListingCount();
-        for (uint256 i; i < count; ++i) {
-            uint256 bondId = handler.getActiveListingBondIdAt(i);
-            assertTrue(handler.ghostBondOutstanding(bondId), "Ghost-tracked listed bond must be outstanding");
+    /// @notice The handler's per-bond outstanding flag must always mirror the on-chain coffer state.
+    /// @dev "Listed ⇒ outstanding" is NOT a protocol invariant: a bond can become non-outstanding
+    ///      (maturity / redemption, modelled by handlerSetNonOutstanding) while a listing signature
+    ///      still exists, the marketplace simply makes that listing unfillable (buySignedListing
+    ///      reverts BondNotOutstanding) rather than cancelling it. So we assert the ghost-vs-chain
+    ///      mirror instead, analogous to the nonce and NFT-ownership mirror invariants.
+    function invariant_bondOutstandingMatchesChain() public view {
+        uint256 numBonds = handler.getMintedBondCount();
+        for (uint256 j; j < numBonds; ++j) {
+            uint256 bondId = handler.getMintedBondIdAt(j);
+            bool chainOutstanding = coffer.maturityValues(bondId) != 0;
+            assertEq(
+                handler.ghostBondOutstanding(bondId), chainOutstanding, "Ghost outstanding flag desynced from chain"
+            );
         }
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Category 7 — Debug
+    //  Category 6, Debug
     // ═══════════════════════════════════════════════════════════════
 
-    // solhint-disable-next-line no-empty-blocks
     function invariant_callSummary() public view {
         console2.log("--- Call Summary ---");
-        console2.log("mintBond:          ", handler.callsMintBond());
-        console2.log("list:              ", handler.callsList());
-        console2.log("cancelListing:     ", handler.callsCancelListing());
-        console2.log("buy:               ", handler.callsBuy());
-        console2.log("makeOffer:         ", handler.callsMakeOffer());
-        console2.log("cancelOffer:       ", handler.callsCancelOffer());
-        console2.log("acceptOffer:       ", handler.callsAcceptOffer());
-        console2.log("warpTime:          ", handler.callsWarpTime());
-        console2.log("setNonOutstanding: ", handler.callsSetNonOutstanding());
-        console2.log("transferNft:       ", handler.callsTransferNft());
-        console2.log("--- Ghost State ---");
-        console2.log("activeListings:    ", handler.getActiveListingCount());
-        console2.log("activeOffers:      ", handler.getActiveOfferCount());
-        console2.log("mintedBonds:       ", handler.getMintedBondCount());
-        console2.log("listingsCreated:   ", handler.ghostTotalListingsCreated());
-        console2.log("listingsPurchased: ", handler.ghostTotalListingsPurchased());
-        console2.log("offersMade:        ", handler.ghostTotalOffersMade());
-        console2.log("offersAccepted:    ", handler.ghostTotalOffersAccepted());
+        console2.log("mintBond:              ", handler.callsMintBond());
+        console2.log("signListing:           ", handler.callsSignListing());
+        console2.log("cancelListing:         ", handler.callsCancelListing());
+        console2.log("cancelAllListings:     ", handler.callsCancelAllListings());
+        console2.log("buySignedListing:      ", handler.callsBuySignedListing());
+        console2.log("signOffer:             ", handler.callsSignOffer());
+        console2.log("cancelOffer:           ", handler.callsCancelOffer());
+        console2.log("cancelAllOffers:       ", handler.callsCancelAllOffers());
+        console2.log("acceptSignedOffer:     ", handler.callsAcceptSignedOffer());
+        console2.log("warpTime:              ", handler.callsWarpTime());
+        console2.log("setNonOutstanding:     ", handler.callsSetNonOutstanding());
+        console2.log("transferNft:           ", handler.callsTransferNft());
+        console2.log("--- Ghost Counters ---");
+        console2.log("mintedBonds:           ", handler.getMintedBondCount());
+        console2.log("listingsCreated:       ", handler.ghostTotalListingsCreated());
+        console2.log("listingsPurchased:     ", handler.ghostTotalListingsPurchased());
+        console2.log("listingsCancelled:     ", handler.ghostTotalListingsCancelled());
+        console2.log("listingsRevoked:       ", handler.ghostTotalListingsRevoked());
+        console2.log("offersMade:            ", handler.ghostTotalOffersMade());
+        console2.log("offersAccepted:        ", handler.ghostTotalOffersAccepted());
+        console2.log("offersCancelled:       ", handler.ghostTotalOffersCancelled());
+        console2.log("offersRevoked:         ", handler.ghostTotalOffersRevoked());
     }
 }

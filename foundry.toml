@@ -6,6 +6,7 @@ solc = "0.8.34"
 remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
 no_match_coverage = "^test/|^script/|^integration/"
 no_match_path =  "test/{invariant,integration}/*" #comment this line if wan to test invariants with -> forge test --mp "test/invariant/*"
+#ffi = true
 
 [fuzz]
 runs = 1024

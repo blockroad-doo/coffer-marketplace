@@ -116,17 +116,78 @@ contract CofferMarketplaceFeesTest is Test {
     MockCoffer public coffer;
     MockWETH public weth;
 
-    address public seller = makeAddr("seller");
-    address public buyer = makeAddr("buyer");
+    uint256 constant SELLER_PK = 0xA11CE;
+    uint256 constant BUYER_PK = 0xB0B;
+
+    address public seller;
+    address public buyer;
     address public nonOwner = makeAddr("nonOwner");
     address public mpOwner = makeAddr("mpOwner");
     address public feeRecipient = makeAddr("feeRecipient");
 
     uint256 public bondId;
 
-    uint128 constant FLAT_FEE = 0.00005 ether;
-    uint128 constant PROFIT_FIXED = 0.00005 ether;
     uint16 constant PROFIT_BPS = 800; // 8%
+
+    // ───── EIP-712 Helpers ─────
+
+    bytes32 constant LISTING_TYPEHASH =
+        keccak256("Listing(uint256 bondId,uint128 price,uint64 expiration,uint256 nonce,uint256 globalNonce)");
+    bytes32 constant OFFER_TYPEHASH = keccak256(
+        "Offer(uint256 bondId,uint128 wethAmount,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+    );
+    bytes32 constant DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+
+    function _domainSeparator() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                DOMAIN_TYPEHASH,
+                keccak256(bytes("CofferMarketplace")),
+                keccak256(bytes("2")),
+                block.chainid,
+                address(marketplace)
+            )
+        );
+    }
+
+    function _listingDigest(uint256 bId, uint128 pr, uint64 exp, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, exp, nonce, gNonce));
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+    }
+
+    function _offerDigest(uint256 bId, uint128 wAmt, uint64 exp, uint256 maxF, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, exp, maxF, nonce, gNonce));
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+    }
+
+    function _signListing(uint256 pk, uint256 bId, uint128 pr, uint64 exp, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 digest = _listingDigest(bId, pr, exp, nonce, gNonce);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _signOffer(uint256 pk, uint256 bId, uint128 wAmt, uint64 exp, uint256 maxF, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 digest = _offerDigest(bId, wAmt, exp, maxF, nonce, gNonce);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
+    }
 
     function setUp() public {
         vm.warp(100_000);
@@ -135,6 +196,9 @@ contract CofferMarketplaceFeesTest is Test {
         weth = new MockWETH();
 
         marketplace = new CofferMarketplace(address(weth), address(bondNft), mpOwner, feeRecipient);
+
+        seller = vm.addr(SELLER_PK);
+        buyer = vm.addr(BUYER_PK);
 
         bondId = bondNft.mintTo(seller, address(coffer));
 
@@ -152,14 +216,9 @@ contract CofferMarketplaceFeesTest is Test {
     }
 
     function _configureFees() internal {
-        vm.startPrank(mpOwner);
-        marketplace.setFunctionFee(marketplace.list.selector, FLAT_FEE, 0);
-        marketplace.setFunctionFee(marketplace.cancelListing.selector, FLAT_FEE, 0);
-        marketplace.setFunctionFee(marketplace.makeOffer.selector, FLAT_FEE, 0);
-        marketplace.setFunctionFee(marketplace.cancelOffer.selector, FLAT_FEE, 0);
-        marketplace.setFunctionFee(marketplace.buy.selector, PROFIT_FIXED, PROFIT_BPS);
-        marketplace.setFunctionFee(marketplace.acceptOffer.selector, PROFIT_FIXED, PROFIT_BPS);
-        vm.stopPrank();
+        // The only protocol fee is a profit-based percentage on the two trade actions.
+        vm.prank(mpOwner);
+        marketplace.setFeeBps(PROFIT_BPS, PROFIT_BPS);
     }
 
     // ───── Admin: setFeeRecipient ─────
@@ -183,27 +242,31 @@ contract CofferMarketplaceFeesTest is Test {
         marketplace.setFeeRecipient(address(0));
     }
 
-    // ───── Admin: setFunctionFee ─────
+    // ───── Admin: setFeeBps ─────
 
-    function test_setFunctionFee() public {
-        bytes4 sel = marketplace.list.selector;
+    function test_setFeeBps() public {
         vm.prank(mpOwner);
-        marketplace.setFunctionFee(sel, 123, 456);
-        (uint128 fx, uint16 bps) = marketplace.sFunctionFees(sel);
-        assertEq(fx, 123);
-        assertEq(bps, 456);
+        marketplace.setFeeBps(123, 456);
+        assertEq(marketplace.sListingFeeBps(), 123);
+        assertEq(marketplace.sOfferFeeBps(), 456);
     }
 
-    function test_setFunctionFee_revert_notOwner() public {
+    function test_setFeeBps_revert_notOwner() public {
         vm.prank(nonOwner);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, nonOwner));
-        marketplace.setFunctionFee(marketplace.list.selector, 1, 1);
+        marketplace.setFeeBps(1, 1);
     }
 
-    function test_setFunctionFee_revert_bpsTooHigh() public {
+    function test_setFeeBps_revert_listingBpsTooHigh() public {
         vm.prank(mpOwner);
         vm.expectRevert(CofferMarketplace.FeeTooHigh.selector);
-        marketplace.setFunctionFee(marketplace.list.selector, 1, 10000);
+        marketplace.setFeeBps(10000, 0);
+    }
+
+    function test_setFeeBps_revert_offerBpsTooHigh() public {
+        vm.prank(mpOwner);
+        vm.expectRevert(CofferMarketplace.FeeTooHigh.selector);
+        marketplace.setFeeBps(0, 10000);
     }
 
     // ───── Admin: Ownable2Step transfer ─────
@@ -213,7 +276,6 @@ contract CofferMarketplaceFeesTest is Test {
         vm.prank(mpOwner);
         marketplace.transferOwnership(newOwner);
 
-        // Old owner still controls until accept
         assertEq(marketplace.owner(), mpOwner);
         assertEq(marketplace.pendingOwner(), newOwner);
 
@@ -236,16 +298,25 @@ contract CofferMarketplaceFeesTest is Test {
         marketplace.claimFees();
     }
 
-    function test_claimFees_afterListFee() public {
-        vm.prank(seller);
-        marketplace.list{value: FLAT_FEE}(bondId, 1 ether, uint64(block.timestamp + 1 days), FLAT_FEE);
+    function test_claimFees_afterBuySignedListingFee() public {
+        uint128 price = 1 ether;
+        coffer.setMaturityValue(2 ether); // profit = 1 ether
+        uint64 exp = uint64(block.timestamp + 1 days);
+        uint256 nonce = marketplace.sListingNonce(seller, bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, nonce, 0);
 
-        assertEq(address(marketplace).balance, FLAT_FEE);
+        uint256 expectedFee = (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
+        vm.prank(buyer);
+        marketplace.buySignedListing{value: uint256(price) + expectedFee}(
+            bondId, seller, price, exp, nonce, 0, expectedFee, sig
+        );
+
+        assertEq(address(marketplace).balance, expectedFee);
 
         uint256 recipBefore = feeRecipient.balance;
         vm.prank(mpOwner);
         marketplace.claimFees();
-        assertEq(feeRecipient.balance - recipBefore, FLAT_FEE);
+        assertEq(feeRecipient.balance - recipBefore, expectedFee);
         assertEq(address(marketplace).balance, 0);
     }
 
@@ -263,52 +334,26 @@ contract CofferMarketplaceFeesTest is Test {
         marketplace.claimWethFees();
     }
 
-    // ───── Fee math: _list (flat) ─────
+    // ───── Fee math: buySignedListing (profit-based) ─────
 
-    function test_list_chargesFlatFee() public {
-        uint256 mktBefore = address(marketplace).balance;
-        vm.prank(seller);
-        marketplace.list{value: FLAT_FEE}(bondId, 1 ether, uint64(block.timestamp + 1 days), FLAT_FEE);
-        assertEq(address(marketplace).balance - mktBefore, FLAT_FEE);
-    }
-
-    function test_list_revert_insufficientFee_underpay() public {
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.list{value: FLAT_FEE - 1}(bondId, 1 ether, uint64(block.timestamp + 1 days), FLAT_FEE);
-    }
-
-    function test_list_revert_insufficientFee_overpay() public {
-        // Exact-match required
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.list{value: FLAT_FEE + 1}(bondId, 1 ether, uint64(block.timestamp + 1 days), FLAT_FEE);
-    }
-
-    function test_list_revert_feeExceedsMax() public {
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.FeeExceedsMax.selector);
-        marketplace.list{value: FLAT_FEE}(bondId, 1 ether, uint64(block.timestamp + 1 days), FLAT_FEE - 1);
-    }
-
-    // ───── Fee math: _buy (profit-based) ─────
-
-    function test_buy_chargesProfitFee() public {
+    function test_buySignedListing_chargesProfitFee() public {
         uint128 price = 1 ether;
         coffer.setMaturityValue(2 ether); // profit = 1 ether
+        uint64 exp = uint64(block.timestamp + 1 days);
 
-        // Seller lists (pays flat fee)
-        vm.prank(seller);
-        marketplace.list{value: FLAT_FEE}(bondId, price, uint64(block.timestamp + 1 days), FLAT_FEE);
+        uint256 nonce = marketplace.sListingNonce(seller, bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, nonce, 0);
 
-        // Fee = PROFIT_FIXED + 1 ether * 800 / 10000 = 0.00005 + 0.08 = 0.08005 ether
-        uint256 expectedBuyFee = uint256(PROFIT_FIXED) + (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
+        // Fee = profit * bps / 10000 = 1 ether * 800 / 10000 = 0.08 ether
+        uint256 expectedBuyFee = (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
         uint256 sellerBefore = seller.balance;
         uint256 buyerBefore = buyer.balance;
         uint256 mktBefore = address(marketplace).balance;
 
         vm.prank(buyer);
-        marketplace.buy{value: price + expectedBuyFee}(bondId, price, expectedBuyFee);
+        marketplace.buySignedListing{value: price + expectedBuyFee}(
+            bondId, seller, price, exp, nonce, 0, expectedBuyFee, sig
+        );
 
         assertEq(bondNft.ownerOf(bondId), buyer);
         assertEq(seller.balance - sellerBefore, price);
@@ -316,144 +361,174 @@ contract CofferMarketplaceFeesTest is Test {
         assertEq(buyerBefore - buyer.balance, price + expectedBuyFee);
     }
 
-    function test_buy_noProfit_stillChargesFixed() public {
+    function test_buySignedListing_noProfit_chargesNothing() public {
         uint128 price = 10 ether; // >= maturityValue
-        coffer.setMaturityValue(5 ether); // profit = 0 (price > maturity)
-        weth.mint(seller, 100 ether); // allow WETH fallback if needed
+        coffer.setMaturityValue(5 ether);
+        weth.mint(seller, 100 ether);
         vm.deal(buyer, 100 ether);
+        uint64 exp = uint64(block.timestamp + 1 days);
 
-        vm.prank(seller);
-        marketplace.list{value: FLAT_FEE}(bondId, price, uint64(block.timestamp + 1 days), FLAT_FEE);
+        uint256 nonce = marketplace.sListingNonce(seller, bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, nonce, 0);
 
-        uint256 expectedBuyFee = PROFIT_FIXED; // no profit → flat only
+        // With no profit and no fixed component, the fee is exactly zero.
         vm.prank(buyer);
-        marketplace.buy{value: uint256(price) + expectedBuyFee}(bondId, price, expectedBuyFee);
-        assertEq(address(marketplace).balance, uint256(FLAT_FEE) + expectedBuyFee);
+        marketplace.buySignedListing{value: uint256(price)}(bondId, seller, price, exp, nonce, 0, 0, sig);
+        assertEq(address(marketplace).balance, 0);
     }
 
-    function test_buy_revert_feeExceedsMax() public {
+    function test_buySignedListing_revert_feeExceedsMax() public {
         uint128 price = 1 ether;
         coffer.setMaturityValue(2 ether);
+        uint64 exp = uint64(block.timestamp + 1 days);
 
-        vm.prank(seller);
-        marketplace.list{value: FLAT_FEE}(bondId, price, uint64(block.timestamp + 1 days), FLAT_FEE);
+        uint256 nonce = marketplace.sListingNonce(seller, bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, nonce, 0);
 
-        uint256 trueFee = uint256(PROFIT_FIXED) + (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
+        uint256 trueFee = (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.FeeExceedsMax.selector);
-        marketplace.buy{value: price + trueFee}(bondId, price, trueFee - 1);
+        marketplace.buySignedListing{value: price + trueFee}(bondId, seller, price, exp, nonce, 0, trueFee - 1, sig);
     }
 
-    function test_buy_revert_insufficientPaymentForFee() public {
+    function test_buySignedListing_revert_insufficientPaymentForFee() public {
         uint128 price = 1 ether;
         coffer.setMaturityValue(2 ether);
+        uint64 exp = uint64(block.timestamp + 1 days);
 
-        vm.prank(seller);
-        marketplace.list{value: FLAT_FEE}(bondId, price, uint64(block.timestamp + 1 days), FLAT_FEE);
+        uint256 nonce = marketplace.sListingNonce(seller, bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, nonce, 0);
 
-        uint256 trueFee = uint256(PROFIT_FIXED) + (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
+        uint256 trueFee = (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        // Send only price — missing fee
-        marketplace.buy{value: price}(bondId, price, trueFee);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, exp, nonce, 0, trueFee, sig);
     }
 
-    // ───── Fee lock at makeOffer ─────
+    // ───── Fee math: acceptSignedOffer (profit-based, capped by signed max) ─────
 
-    function test_makeOffer_locksFeeOnOffer() public {
+    function test_acceptSignedOffer_chargesProfitFee() public {
         uint128 offerAmount = 1 ether;
         coffer.setMaturityValue(2 ether); // revenue = 1 ether
+        uint64 exp = uint64(block.timestamp + 1 days);
 
-        uint256 expectedLocked = uint256(PROFIT_FIXED) + (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
+        // Offer with no fee cap
+        uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
+        bytes memory sig = _signOffer(BUYER_PK, bondId, offerAmount, exp, type(uint256).max, nonce, 0);
 
-        vm.prank(buyer);
-        marketplace.makeOffer{value: FLAT_FEE}(bondId, offerAmount, uint64(block.timestamp + 1 days), FLAT_FEE);
-
-        (,,, uint128 locked) = marketplace.sOffers(bondId, buyer);
-        assertEq(locked, expectedLocked);
-        assertEq(address(marketplace).balance, FLAT_FEE);
-    }
-
-    function test_acceptOffer_pullsLockedWethFee() public {
-        uint128 offerAmount = 1 ether;
-        coffer.setMaturityValue(2 ether);
-
-        vm.prank(buyer);
-        marketplace.makeOffer{value: FLAT_FEE}(bondId, offerAmount, uint64(block.timestamp + 1 days), FLAT_FEE);
-
-        uint256 expectedLocked = uint256(PROFIT_FIXED) + (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
-
+        uint256 expectedFee = (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
         uint256 sellerWethBefore = weth.balanceOf(seller);
         uint256 buyerWethBefore = weth.balanceOf(buyer);
 
         vm.prank(seller);
-        marketplace.acceptOffer(bondId, buyer, offerAmount);
+        marketplace.acceptSignedOffer(bondId, buyer, offerAmount, exp, type(uint256).max, nonce, 0, sig);
 
         assertEq(bondNft.ownerOf(bondId), buyer);
         assertEq(weth.balanceOf(seller) - sellerWethBefore, offerAmount);
-        assertEq(buyerWethBefore - weth.balanceOf(buyer), uint256(offerAmount) + expectedLocked);
-        assertEq(weth.balanceOf(address(marketplace)), expectedLocked);
+        assertEq(buyerWethBefore - weth.balanceOf(buyer), uint256(offerAmount) + expectedFee);
+        assertEq(weth.balanceOf(address(marketplace)), expectedFee);
     }
 
-    function test_acceptOffer_usesLockedFee_notCurrentConfig() public {
-        // makeOffer at rate A
+    function test_acceptSignedOffer_revertsWhenFeeExceedsSignedMax() public {
+        uint128 offerAmount = 1 ether;
+        coffer.setMaturityValue(2 ether); // revenue = 1 ether
+        uint64 exp = uint64(block.timestamp + 1 days);
+
+        // Buyer signs with maxOfferFee = 0.01 ether (less than actual fee of 0.08)
+        uint256 lowMaxFee = 0.01 ether;
+        uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
+        bytes memory sig = _signOffer(BUYER_PK, bondId, offerAmount, exp, lowMaxFee, nonce, 0);
+
+        // Actual fee = 0.08 ether > 0.01 ether, so accept reverts
+        vm.prank(seller);
+        vm.expectRevert(CofferMarketplace.FeeExceedsMax.selector);
+        marketplace.acceptSignedOffer(bondId, buyer, offerAmount, exp, lowMaxFee, nonce, 0, sig);
+    }
+
+    function test_acceptSignedOffer_usesLowerFeeWhenAdminLowersCharges() public {
         uint128 offerAmount = 1 ether;
         coffer.setMaturityValue(2 ether);
-        vm.prank(buyer);
-        marketplace.makeOffer{value: FLAT_FEE}(bondId, offerAmount, uint64(block.timestamp + 1 days), FLAT_FEE);
+        uint64 exp = uint64(block.timestamp + 1 days);
 
-        uint256 expectedLocked = uint256(PROFIT_FIXED) + (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
+        // Buyer signs with generous maxOfferFee
+        uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
+        bytes memory sig = _signOffer(BUYER_PK, bondId, offerAmount, exp, type(uint256).max, nonce, 0);
 
-        // Admin changes acceptOffer fee to something much higher BEFORE acceptance
+        // Admin LOWERS fee before acceptance
+        uint16 lowerBps = 100; // 1%
+        uint16 listingBps = marketplace.sListingFeeBps();
         vm.prank(mpOwner);
-        marketplace.setFunctionFee(marketplace.acceptOffer.selector, 1 ether, 9000);
+        marketplace.setFeeBps(listingBps, lowerBps);
 
-        // Accept uses the old locked fee, not the new config
+        uint256 expectedLowerFee = (uint256(1 ether) * uint256(lowerBps)) / 10000;
+
         vm.prank(seller);
-        marketplace.acceptOffer(bondId, buyer, offerAmount);
+        marketplace.acceptSignedOffer(bondId, buyer, offerAmount, exp, type(uint256).max, nonce, 0, sig);
 
-        assertEq(weth.balanceOf(address(marketplace)), expectedLocked);
+        assertEq(weth.balanceOf(address(marketplace)), expectedLowerFee);
     }
 
-    function test_makeOffer_revert_insufficientWethForLockedFee() public {
-        // Drain buyer to barely cover offer amount but not offer + fee
-        uint128 offerAmount = 99 ether; // balance is 100, not enough for 99 + fee
-        coffer.setMaturityValue(200 ether); // huge profit → big fee
+    function test_acceptSignedOffer_adminFeeTest_raisedBpsRevertsUnderSignedCap() public {
+        // Admin has fee at 800 bps. Buyer signs with a cap big enough for 800 bps on a 1 ether
+        // revenue (0.08 ether). Admin RAISES the offer fee to 9000 bps, which on the same revenue
+        // is 0.9 ether and exceeds the signed cap, so accept reverts.
+        uint128 offerAmount = 1 ether;
+        coffer.setMaturityValue(2 ether); // revenue = 1 ether
+        uint64 exp = uint64(block.timestamp + 1 days);
 
-        vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.InsufficientWethBalance.selector);
-        marketplace.makeOffer{value: FLAT_FEE}(bondId, offerAmount, uint64(block.timestamp + 1 days), FLAT_FEE);
+        uint256 cap = 0.5 ether; // passes 800 bps, fails 9000 bps
+        uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
+        bytes memory sig = _signOffer(BUYER_PK, bondId, offerAmount, exp, cap, nonce, 0);
+
+        // Admin raises the offer fee bps so the computed fee exceeds the signed cap.
+        uint16 listingBps = marketplace.sListingFeeBps();
+        vm.prank(mpOwner);
+        marketplace.setFeeBps(listingBps, 9000);
+
+        vm.prank(seller);
+        vm.expectRevert(CofferMarketplace.FeeExceedsMax.selector);
+        marketplace.acceptSignedOffer(bondId, buyer, offerAmount, exp, cap, nonce, 0, sig);
     }
 
-    // ───── Batch fee scaling ─────
+    // ───── Non-payable: acceptSignedOffer rejects ETH ─────
 
-    // ───── Non-payable: acceptOffer rejects ETH ─────
-
-    function test_acceptOffer_rejectsSentEth() public {
-        vm.prank(buyer);
-        marketplace.makeOffer{value: FLAT_FEE}(bondId, 1 ether, uint64(block.timestamp + 1 days), FLAT_FEE);
+    function test_acceptSignedOffer_rejectsSentEth() public {
+        uint64 exp = uint64(block.timestamp + 1 days);
+        uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
+        bytes memory sig = _signOffer(BUYER_PK, bondId, 1 ether, exp, type(uint256).max, nonce, 0);
 
         vm.prank(seller);
         vm.deal(seller, 1 ether);
         (bool ok,) = address(marketplace).call{value: 1}(
-            abi.encodeWithSelector(marketplace.acceptOffer.selector, bondId, buyer, uint128(1 ether))
+            abi.encodeWithSelector(
+                marketplace.acceptSignedOffer.selector,
+                bondId,
+                buyer,
+                uint128(1 ether),
+                exp,
+                type(uint256).max,
+                nonce,
+                uint256(0),
+                sig
+            )
         );
         assertFalse(ok);
     }
 
     // ───── Claim: WETH happy path ─────
 
-    function test_claimWethFees_afterAcceptOfferFee() public {
+    function test_claimWethFees_afterAcceptSignedOfferFee() public {
         uint128 offerAmount = 1 ether;
-        coffer.setMaturityValue(2 ether); // revenue = 1 ether
+        coffer.setMaturityValue(2 ether);
+        uint64 exp = uint64(block.timestamp + 1 days);
 
-        vm.prank(buyer);
-        marketplace.makeOffer{value: FLAT_FEE}(bondId, offerAmount, uint64(block.timestamp + 1 days), FLAT_FEE);
+        uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
+        bytes memory sig = _signOffer(BUYER_PK, bondId, offerAmount, exp, type(uint256).max, nonce, 0);
 
         vm.prank(seller);
-        marketplace.acceptOffer(bondId, buyer, offerAmount);
+        marketplace.acceptSignedOffer(bondId, buyer, offerAmount, exp, type(uint256).max, nonce, 0, sig);
 
-        uint256 expectedFee = uint256(PROFIT_FIXED) + (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
+        uint256 expectedFee = (uint256(1 ether) * uint256(PROFIT_BPS)) / 10000;
         assertEq(weth.balanceOf(address(marketplace)), expectedFee);
 
         uint256 recipBefore = weth.balanceOf(feeRecipient);
@@ -462,47 +537,5 @@ contract CofferMarketplaceFeesTest is Test {
 
         assertEq(weth.balanceOf(feeRecipient) - recipBefore, expectedFee);
         assertEq(weth.balanceOf(address(marketplace)), 0);
-    }
-
-    // ───── InsufficientFee on single-item payable wrappers ─────
-
-    function test_cancelListing_revert_insufficientFee() public {
-        vm.prank(seller);
-        marketplace.list{value: FLAT_FEE}(bondId, 1 ether, uint64(block.timestamp + 1 days), FLAT_FEE);
-
-        vm.prank(seller);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.cancelListing{value: FLAT_FEE - 1}(bondId, FLAT_FEE);
-    }
-
-    function test_makeOffer_revert_insufficientFee() public {
-        vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.makeOffer{value: FLAT_FEE - 1}(bondId, 1 ether, uint64(block.timestamp + 1 days), FLAT_FEE);
-    }
-
-    function test_cancelOffer_revert_insufficientFee() public {
-        vm.prank(buyer);
-        marketplace.makeOffer{value: FLAT_FEE}(bondId, 1 ether, uint64(block.timestamp + 1 days), FLAT_FEE);
-
-        vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.InsufficientFee.selector);
-        marketplace.cancelOffer{value: FLAT_FEE - 1}(bondId, FLAT_FEE);
-    }
-
-    // ───── Fee on fixed-price actions (list + makeOffer) ─────
-
-    // ───── FeeExceedsMax at makeOffer uint128 cast ─────
-
-    function test_makeOffer_revert_feeExceedsUint128Cast() public {
-        // Push locked fee above uint128.max. fixedFee = uint128.max + any positive percentageFee > uint128.max.
-        vm.prank(mpOwner);
-        marketplace.setFunctionFee(marketplace.acceptOffer.selector, type(uint128).max, 1);
-
-        coffer.setMaturityValue(2 ether); // revenue = 1 ether so percentageFee > 0
-
-        vm.prank(buyer);
-        vm.expectRevert(CofferMarketplace.FeeExceedsMax.selector);
-        marketplace.makeOffer{value: FLAT_FEE}(bondId, 1 ether, uint64(block.timestamp + 1 days), FLAT_FEE);
     }
 }

@@ -9,7 +9,10 @@ out/
 
 # Docs
 docs/
-invariant_eth_conservation_flake.md
 
 # Dotenv file
 .env
+
+#audit 
+test/audit-poc
+audit
