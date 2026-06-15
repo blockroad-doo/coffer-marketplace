@@ -349,7 +349,7 @@ contract CofferMarketplaceHandler is Test {
         if (!ghostBondOutstanding[bondId]) return;
         if (ghostBondOwner[bondId] != seller) return;
         if (buyer.balance < price) return;
-        // forge-lint-disable-next-line block-timestamp
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > expiration) return;
 
         // Reconstruct the seller's signature from the listing parameters
@@ -454,7 +454,7 @@ contract CofferMarketplaceHandler is Test {
         if (buyer == address(0)) return;
 
         // Pre-flight checks
-        // forge-lint-disable-next-line block-timestamp
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > expiration) return;
         if (weth.balanceOf(buyer) < amount) return;
         if (weth.allowance(buyer, address(marketplace)) < amount) return;

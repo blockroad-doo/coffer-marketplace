@@ -444,6 +444,7 @@ contract CofferMarketplaceAuditTest is Test {
         vm.warp(block.timestamp + warpSeconds);
 
         vm.prank(buyer);
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > exp) {
             vm.expectRevert(CofferMarketplace.ExpirationNotInFuture.selector);
         } else {

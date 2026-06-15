@@ -490,9 +490,8 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     /// @notice Shared pre-trade check: expiry. Bond value is gated by the signed maturityValue at fill.
     /// @param _expiration The expiration timestamp
     function _validateTrade(uint64 _expiration) internal view {
-        // forge-lint-disable-next-line block-timestamp
         // solhint-disable-next-line gas-strict-inequalities
-        require(block.timestamp <= _expiration, ExpirationNotInFuture());
+        require(block.timestamp <= _expiration, ExpirationNotInFuture()); // forge-lint: disable-line(block-timestamp)
     }
 
     /// @notice Finalise a signed-listing purchase: NFT, ETH/WETH, refund, event.
