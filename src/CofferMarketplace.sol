@@ -33,6 +33,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     error ZeroAmount();
     error NotOwner();
     error BondNotOutstanding();
+    error MaturityValueMismatch();
     error SellerNoLongerOwnsNft();
     error MarketplaceNotApproved();
     error ExpirationNotInFuture();
@@ -49,13 +50,14 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
     // ───── EIP-712 Typehashes ─────
 
-    /* solhint-disable gas-small-strings */
-    bytes32 private constant LISTING_TYPEHASH =
-        keccak256("Listing(uint256 bondId,uint128 price,uint64 expiration,uint256 nonce,uint256 globalNonce)");
-    bytes32 private constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+    /* solhint-disable gas-small-strings, max-line-length */
+    bytes32 private constant LISTING_TYPEHASH = keccak256(
+        "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
-    /* solhint-enable gas-small-strings */
+    bytes32 private constant OFFER_TYPEHASH = keccak256(
+        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+    );
+    /* solhint-enable gas-small-strings, max-line-length */
 
     // ───── Constants ─────
 
@@ -160,7 +162,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
     constructor(address _weth, address _cofferBondNft, address _owner, address _feeRecipient)
         Ownable(_owner)
-        EIP712("CofferMarketplace", "2")
+        EIP712("CofferMarketplace", "3")
     {
         require(_weth != address(0), ZeroAddress());
         require(_cofferBondNft != address(0), ZeroAddress());
@@ -238,13 +240,14 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         address _signer,
         uint256 _bondId,
         uint128 _price,
+        uint128 _maturityValue,
         uint64 _expiration,
         uint256 _nonce,
         uint256 _globalNonce,
         bytes calldata _sig
     ) internal view {
         bytes32 digest = _hashTypedDataV4(
-            keccak256(abi.encode(LISTING_TYPEHASH, _bondId, _price, _expiration, _nonce, _globalNonce))
+            keccak256(abi.encode(LISTING_TYPEHASH, _bondId, _price, _maturityValue, _expiration, _nonce, _globalNonce))
         );
         require(SignatureChecker.isValidSignatureNowCalldata(_signer, digest, _sig), InvalidSignature());
     }
@@ -253,6 +256,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         address _signer,
         uint256 _bondId,
         uint128 _wethAmount,
+        uint128 _maturityValue,
         uint64 _expiration,
         uint256 _maxFee,
         uint256 _nonce,
@@ -260,7 +264,12 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         bytes calldata _sig
     ) internal view {
         bytes32 digest = _hashTypedDataV4(
-            keccak256(abi.encode(OFFER_TYPEHASH, _bondId, _wethAmount, _expiration, _maxFee, _nonce, _globalNonce))
+            keccak256(
+                // solhint-disable-next-line max-line-length
+                abi.encode(
+                    OFFER_TYPEHASH, _bondId, _wethAmount, _maturityValue, _expiration, _maxFee, _nonce, _globalNonce
+                )
+            )
         );
         require(SignatureChecker.isValidSignatureNowCalldata(_signer, digest, _sig), InvalidSignature());
     }
@@ -301,6 +310,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     /// @param _bondId The bond token ID
     /// @param _seller The seller address (signer of the listing)
     /// @param _price The listing price from the signed message
+    /// @param _maturityValue The bond maturity value from the signed message, must equal the live value at fill
     /// @param _expiration The listing expiration from the signed message
     /// @param _nonce The signed nonce (must equal current per-bond nonce)
     /// @param _globalNonce The signed global nonce (must equal current global nonce)
@@ -310,6 +320,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         uint256 _bondId,
         address _seller,
         uint128 _price,
+        uint128 _maturityValue,
         uint64 _expiration,
         uint256 _nonce,
         uint256 _globalNonce,
@@ -328,11 +339,13 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         // solhint-disable-next-line max-line-length
         require(ICofferBondNft(I_COFFER_BOND_NFT).isApprovedForAll(_seller, address(this)), MarketplaceNotApproved());
 
-        _validateTrade(_bondId, _expiration);
+        _validateTrade(_expiration);
 
-        _verifyListingSig(_seller, _bondId, _price, _expiration, _nonce, _globalNonce, _sig);
+        _verifyListingSig(_seller, _bondId, _price, _maturityValue, _expiration, _nonce, _globalNonce, _sig);
 
         uint128 maturityValue = _getBondMaturity(_bondId);
+        require(maturityValue != 0, BondNotOutstanding());
+        require(maturityValue == _maturityValue, MaturityValueMismatch());
         uint256 profit = maturityValue > _price ? uint256(maturityValue) - uint256(_price) : 0;
         uint256 fee = _feeOnProfit(profit, sListingFeeBps, _maxFee);
 
@@ -382,6 +395,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     /// @param _bondId The bond token ID
     /// @param _buyer The offerer address (signer of the offer)
     /// @param _wethAmount The WETH offer amount from the signed message
+    /// @param _maturityValue The bond maturity value from the signed message, must equal the live value at fill
     /// @param _expiration The offer expiration from the signed message
     /// @param _maxOfferFee The maximum WETH fee signed by the offerer
     /// @param _nonce The signed nonce (must equal current per-bond nonce)
@@ -391,6 +405,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         uint256 _bondId,
         address _buyer,
         uint128 _wethAmount,
+        uint128 _maturityValue,
         uint64 _expiration,
         uint256 _maxOfferFee,
         uint256 _nonce,
@@ -409,11 +424,16 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         // solhint-disable-next-line max-line-length
         require(ICofferBondNft(I_COFFER_BOND_NFT).isApprovedForAll(msg.sender, address(this)), MarketplaceNotApproved());
 
-        _validateTrade(_bondId, _expiration);
+        _validateTrade(_expiration);
 
-        _verifyOfferSig(_buyer, _bondId, _wethAmount, _expiration, _maxOfferFee, _nonce, _globalNonce, _sig);
+        // solhint-disable-next-line max-line-length
+        _verifyOfferSig(
+            _buyer, _bondId, _wethAmount, _maturityValue, _expiration, _maxOfferFee, _nonce, _globalNonce, _sig
+        );
 
         uint128 maturityValue = _getBondMaturity(_bondId);
+        require(maturityValue != 0, BondNotOutstanding());
+        require(maturityValue == _maturityValue, MaturityValueMismatch());
         uint256 revenue = maturityValue > _wethAmount ? uint256(maturityValue) - uint256(_wethAmount) : 0;
         uint256 fee = _feeOnProfit(revenue, sOfferFeeBps, _maxOfferFee);
 
@@ -465,23 +485,14 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         (maturityValue,,,) = ICoffer(cofferAddr).sHolderConditions(_bondId);
     }
 
-    /// @notice Check if a bond is outstanding (maturityValue != 0)
-    /// @param _bondId The bond token ID
-    /// @return Whether the bond is outstanding
-    function _isBondOutstanding(uint256 _bondId) internal view returns (bool) {
-        return _getBondMaturity(_bondId) != 0;
-    }
-
     // ───── Internal: Trade Execution ─────
 
-    /// @notice Shared pre-trade checks: expiry and bond liquidity.
-    /// @param _bondId The bond token ID
+    /// @notice Shared pre-trade check: expiry. Bond value is gated by the signed maturityValue at fill.
     /// @param _expiration The expiration timestamp
-    function _validateTrade(uint256 _bondId, uint64 _expiration) internal view {
+    function _validateTrade(uint64 _expiration) internal view {
         // forge-lint-disable-next-line block-timestamp
         // solhint-disable-next-line gas-strict-inequalities
         require(block.timestamp <= _expiration, ExpirationNotInFuture());
-        require(_isBondOutstanding(_bondId), BondNotOutstanding());
     }
 
     /// @notice Finalise a signed-listing purchase: NFT, ETH/WETH, refund, event.

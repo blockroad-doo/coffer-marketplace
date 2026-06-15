@@ -118,10 +118,11 @@ contract MockWETHForHandler {
 contract CofferMarketplaceHandler is Test {
     // ──── EIP-712 Constants ────
 
-    bytes32 constant LISTING_TYPEHASH =
-        keccak256("Listing(uint256 bondId,uint128 price,uint64 expiration,uint256 nonce,uint256 globalNonce)");
+    bytes32 constant LISTING_TYPEHASH = keccak256(
+        "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+    );
     bytes32 constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -352,10 +353,11 @@ contract CofferMarketplaceHandler is Test {
         if (block.timestamp > expiration) return;
 
         // Reconstruct the seller's signature from the listing parameters
-        bytes memory sig = _signListing(actorPk[seller], bondId, price, expiration, nonce, gNonce);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signListing(actorPk[seller], bondId, price, mat, expiration, nonce, gNonce);
 
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, expiration, nonce, gNonce, 0, sig);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, mat, expiration, nonce, gNonce, 0, sig);
 
         // Nonce auto-incremented by contract
         ghostListingNonce[seller][bondId] = marketplace.sListingNonce(seller, bondId);
@@ -458,10 +460,11 @@ contract CofferMarketplaceHandler is Test {
         if (weth.allowance(buyer, address(marketplace)) < amount) return;
         if (!bondNft.isApprovedForAll(seller, address(marketplace))) return;
 
-        bytes memory sig = _signOffer(actorPk[buyer], bondId, amount, expiration, maxFee, nonce, gNonce);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signOffer(actorPk[buyer], bondId, amount, mat, expiration, maxFee, nonce, gNonce);
 
         vm.prank(seller);
-        marketplace.acceptSignedOffer(bondId, buyer, amount, expiration, maxFee, nonce, gNonce, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, amount, mat, expiration, maxFee, nonce, gNonce, sig);
 
         ghostOfferNonce[buyer][bondId] = marketplace.sOfferNonce(buyer, bondId);
         ghostBondOwner[bondId] = buyer;
@@ -662,47 +665,56 @@ contract CofferMarketplaceHandler is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("2")),
+                keccak256(bytes("3")),
                 block.chainid,
                 address(marketplace)
             )
         );
     }
 
-    function _listingDigest(uint256 bId, uint128 pr, uint64 exp, uint256 nonce, uint256 gNonce)
+    function _listingDigest(uint256 bId, uint128 pr, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
         internal
         view
         returns (bytes32)
     {
-        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, exp, nonce, gNonce));
+        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, mat, exp, nonce, gNonce));
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
     }
 
-    function _offerDigest(uint256 bId, uint128 wAmt, uint64 exp, uint256 maxF, uint256 nonce, uint256 gNonce)
-        internal
-        view
-        returns (bytes32)
-    {
-        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, exp, maxF, nonce, gNonce));
+    function _offerDigest(
+        uint256 bId,
+        uint128 wAmt,
+        uint128 mat,
+        uint64 exp,
+        uint256 maxF,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, maxF, nonce, gNonce));
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
     }
 
-    function _signListing(uint256 pk, uint256 bId, uint128 pr, uint64 exp, uint256 nonce, uint256 gNonce)
+    function _signListing(uint256 pk, uint256 bId, uint128 pr, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
         internal
         view
         returns (bytes memory)
     {
-        bytes32 digest = _listingDigest(bId, pr, exp, nonce, gNonce);
+        bytes32 digest = _listingDigest(bId, pr, mat, exp, nonce, gNonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
 
-    function _signOffer(uint256 pk, uint256 bId, uint128 wAmt, uint64 exp, uint256 maxF, uint256 nonce, uint256 gNonce)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 digest = _offerDigest(bId, wAmt, exp, maxF, nonce, gNonce);
+    function _signOffer(
+        uint256 pk,
+        uint256 bId,
+        uint128 wAmt,
+        uint128 mat,
+        uint64 exp,
+        uint256 maxF,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes memory) {
+        bytes32 digest = _offerDigest(bId, wAmt, mat, exp, maxF, nonce, gNonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }

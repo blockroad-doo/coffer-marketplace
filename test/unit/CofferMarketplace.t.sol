@@ -132,11 +132,14 @@ contract EthRejecter is IERC721Receiver {
         uint256 id,
         address seller,
         uint128 price,
+        uint128 maturityValue,
         uint64 exp,
         uint256 nonce,
         bytes calldata sig
     ) external payable {
-        CofferMarketplace(payable(mp)).buySignedListing{value: msg.value}(id, seller, price, exp, nonce, 0, 0, sig);
+        CofferMarketplace(payable(mp)).buySignedListing{value: msg.value}(
+            id, seller, price, maturityValue, exp, nonce, 0, 0, sig
+        );
     }
 
     function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
@@ -180,10 +183,11 @@ contract CofferMarketplaceTest is Test {
 
     // ───── EIP-712 Helpers ─────
 
-    bytes32 constant LISTING_TYPEHASH =
-        keccak256("Listing(uint256 bondId,uint128 price,uint64 expiration,uint256 nonce,uint256 globalNonce)");
+    bytes32 constant LISTING_TYPEHASH = keccak256(
+        "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+    );
     bytes32 constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -193,47 +197,56 @@ contract CofferMarketplaceTest is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("2")),
+                keccak256(bytes("3")),
                 block.chainid,
                 address(marketplace)
             )
         );
     }
 
-    function _listingDigest(uint256 bId, uint128 pr, uint64 exp, uint256 nonce, uint256 gNonce)
+    function _listingDigest(uint256 bId, uint128 pr, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
         internal
         view
         returns (bytes32)
     {
-        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, exp, nonce, gNonce));
+        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, mat, exp, nonce, gNonce));
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
     }
 
-    function _offerDigest(uint256 bId, uint128 wAmt, uint64 exp, uint256 maxF, uint256 nonce, uint256 gNonce)
-        internal
-        view
-        returns (bytes32)
-    {
-        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, exp, maxF, nonce, gNonce));
+    function _offerDigest(
+        uint256 bId,
+        uint128 wAmt,
+        uint128 mat,
+        uint64 exp,
+        uint256 maxF,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, maxF, nonce, gNonce));
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
     }
 
-    function _signListing(uint256 pk, uint256 bId, uint128 pr, uint64 exp, uint256 nonce, uint256 gNonce)
+    function _signListing(uint256 pk, uint256 bId, uint128 pr, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
         internal
         view
         returns (bytes memory)
     {
-        bytes32 digest = _listingDigest(bId, pr, exp, nonce, gNonce);
+        bytes32 digest = _listingDigest(bId, pr, mat, exp, nonce, gNonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
 
-    function _signOffer(uint256 pk, uint256 bId, uint128 wAmt, uint64 exp, uint256 maxF, uint256 nonce, uint256 gNonce)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 digest = _offerDigest(bId, wAmt, exp, maxF, nonce, gNonce);
+    function _signOffer(
+        uint256 pk,
+        uint256 bId,
+        uint128 wAmt,
+        uint128 mat,
+        uint64 exp,
+        uint256 maxF,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes memory) {
+        bytes32 digest = _offerDigest(bId, wAmt, mat, exp, maxF, nonce, gNonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
@@ -291,7 +304,7 @@ contract CofferMarketplaceTest is Test {
     {
         uint256 nonce = marketplace.sListingNonce(who, bondId);
         uint256 gNonce = marketplace.sGlobalListingNonce(who);
-        sig = _signListing(pk, bondId, price, exp, nonce, gNonce);
+        sig = _signListing(pk, bondId, price, 1 ether, exp, nonce, gNonce);
     }
 
     function _signOfferNow(address who, uint256 pk, uint128 amount) internal view returns (bytes memory sig) {
@@ -313,7 +326,7 @@ contract CofferMarketplaceTest is Test {
     {
         uint256 nonce = marketplace.sOfferNonce(who, bondId);
         uint256 gNonce = marketplace.sGlobalOfferNonce(who);
-        sig = _signOffer(pk, bondId, amount, exp, maxOfferFee, nonce, gNonce);
+        sig = _signOffer(pk, bondId, amount, 1 ether, exp, maxOfferFee, nonce, gNonce);
     }
 
     function _mintBondTo(address to) internal returns (uint256) {
@@ -402,7 +415,7 @@ contract CofferMarketplaceTest is Test {
         uint256 gNonce = marketplace.sGlobalListingNonce(seller);
 
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, exp, nonce, gNonce, 0, sig);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, 1 ether, exp, nonce, gNonce, 0, sig);
 
         assertEq(bondNft.ownerOf(bondId), buyer);
         assertEq(seller.balance - sellerBefore, price);
@@ -416,10 +429,10 @@ contract CofferMarketplaceTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         assertEq(marketplace.sListingNonce(seller, bondId), 0);
 
-        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, 0, 0);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, 1 ether, exp, 0, 0);
 
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, exp, 0, 0, 0, sig);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, 1 ether, exp, 0, 0, 0, sig);
 
         assertEq(bondNft.ownerOf(bondId), buyer);
         assertEq(marketplace.sListingNonce(seller, bondId), 1);
@@ -435,7 +448,7 @@ contract CofferMarketplaceTest is Test {
 
         vm.prank(buyer);
         marketplace.buySignedListing{value: 2 ether}(
-            bondId, seller, price, uint64(block.timestamp + 1 days), nonce, gNonce, 0, sig
+            bondId, seller, price, 1 ether, uint64(block.timestamp + 1 days), nonce, gNonce, 0, sig
         );
 
         assertEq(bondNft.ownerOf(bondId), buyer);
@@ -445,32 +458,32 @@ contract CofferMarketplaceTest is Test {
     function test_buySignedListing_revert_sameParty() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, 1 ether, exp, nonce, 0);
+        bytes memory sig = _signListing(SELLER_PK, bondId, 1 ether, 1 ether, exp, nonce, 0);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.SameParty.selector);
-        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, 1 ether, exp, nonce, 0, 0, sig);
     }
 
     function test_buySignedListing_revert_zeroPrice() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, 0, exp, nonce, 0);
+        bytes memory sig = _signListing(SELLER_PK, bondId, 0, 1 ether, exp, nonce, 0);
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ZeroPrice.selector);
-        marketplace.buySignedListing{value: 0}(bondId, seller, 0, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 0}(bondId, seller, 0, 1 ether, exp, nonce, 0, 0, sig);
     }
 
     function test_buySignedListing_revert_invalidSignature() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
         // Signed by buyer's key but claims seller as the signer
-        bytes memory sig = _signListing(BUYER_PK, bondId, 1 ether, exp, nonce, 0);
+        bytes memory sig = _signListing(BUYER_PK, bondId, 1 ether, 1 ether, exp, nonce, 0);
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
-        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, 1 ether, exp, nonce, 0, 0, sig);
     }
 
     function test_buySignedListing_revert_staleListing() public {
@@ -484,7 +497,7 @@ contract CofferMarketplaceTest is Test {
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.SellerNoLongerOwnsNft.selector);
-        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, 1 ether, exp, nonce, 0, 0, sig);
     }
 
     function test_buySignedListing_revert_bondNotOutstanding() public {
@@ -496,7 +509,7 @@ contract CofferMarketplaceTest is Test {
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
-        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, 1 ether, exp, nonce, 0, 0, sig);
     }
 
     function test_buySignedListing_revert_insufficientPayment() public {
@@ -506,7 +519,7 @@ contract CofferMarketplaceTest is Test {
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
         marketplace.buySignedListing{value: 0.5 ether}(
-            bondId, seller, 1 ether, uint64(block.timestamp + 1 days), nonce, 0, 0, sig
+            bondId, seller, 1 ether, 1 ether, uint64(block.timestamp + 1 days), nonce, 0, 0, sig
         );
     }
 
@@ -519,7 +532,7 @@ contract CofferMarketplaceTest is Test {
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ExpirationNotInFuture.selector);
-        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, 1 ether, exp, nonce, 0, 0, sig);
     }
 
     function test_buySignedListing_revert_replay() public {
@@ -528,13 +541,13 @@ contract CofferMarketplaceTest is Test {
 
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
         vm.prank(buyer);
-        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, 1 ether, exp, nonce, 0, 0, sig);
 
         // Second buy with same nonce should revert (nonce was auto-incremented)
         vm.prank(buyer2);
         vm.deal(buyer2, 100 ether);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
-        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, 1 ether, exp, nonce, 0, 0, sig);
     }
 
     function test_buySignedListing_revert_globallyCancelled() public {
@@ -548,7 +561,7 @@ contract CofferMarketplaceTest is Test {
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
-        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, 1 ether, exp, nonce, 0, 0, sig);
     }
 
     function test_buySignedListing_sellerGetsEth() public {
@@ -564,7 +577,7 @@ contract CofferMarketplaceTest is Test {
         uint256 gNonce = marketplace.sGlobalListingNonce(seller);
 
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, exp, nonce, gNonce, 0, sig);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, 1 ether, exp, nonce, gNonce, 0, sig);
 
         assertEq(seller.balance - sellerBefore, price, "Seller should receive ETH");
         assertEq(weth.balanceOf(seller) - wethBefore, 0, "Seller should not receive WETH");
@@ -588,7 +601,7 @@ contract CofferMarketplaceTest is Test {
 
         // The wallet validates any signature, so an empty signature is accepted
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(cBond, address(cSeller), price, exp, nonce, gNonce, 0, "");
+        marketplace.buySignedListing{value: price}(cBond, address(cSeller), price, 1 ether, exp, nonce, gNonce, 0, "");
 
         assertEq(address(cSeller).balance - sellerEthBefore, 0, "Seller should not receive ETH");
         assertEq(weth.balanceOf(address(cSeller)) - sellerWethBefore, price, "Seller should receive WETH via fallback");
@@ -609,16 +622,16 @@ contract CofferMarketplaceTest is Test {
         // rejecter sends 2 ether for a 1 ether listing, so 1 ether excess must be refunded, and the
         // refund fails because EthRejecter rejects ETH
         vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        rejecter.doBuySigned{value: 2 ether}(address(marketplace), bondId, seller, 1 ether, exp, nonce, sig);
+        rejecter.doBuySigned{value: 2 ether}(address(marketplace), bondId, seller, 1 ether, 1 ether, exp, nonce, sig);
     }
 
     function test_buySignedListing_priceOneWei() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, 1, exp, nonce, 0);
+        bytes memory sig = _signListing(SELLER_PK, bondId, 1, 1 ether, exp, nonce, 0);
 
         vm.prank(buyer);
-        marketplace.buySignedListing{value: 1}(bondId, seller, 1, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 1}(bondId, seller, 1, 1 ether, exp, nonce, 0, 0, sig);
 
         assertEq(bondNft.ownerOf(bondId), buyer);
     }
@@ -669,7 +682,7 @@ contract CofferMarketplaceTest is Test {
         uint256 gNonce = marketplace.sGlobalOfferNonce(buyer);
 
         vm.prank(seller);
-        marketplace.acceptSignedOffer(bondId, buyer, offerAmount, exp, type(uint256).max, nonce, gNonce, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, offerAmount, 1 ether, exp, type(uint256).max, nonce, gNonce, sig);
 
         assertEq(bondNft.ownerOf(bondId), buyer);
         assertEq(weth.balanceOf(seller) - sellerWethBefore, offerAmount);
@@ -679,22 +692,22 @@ contract CofferMarketplaceTest is Test {
     function test_acceptSignedOffer_revert_zeroAmount() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
-        bytes memory sig = _signOffer(BUYER_PK, bondId, 0, exp, type(uint256).max, nonce, 0);
+        bytes memory sig = _signOffer(BUYER_PK, bondId, 0, 1 ether, exp, type(uint256).max, nonce, 0);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.ZeroAmount.selector);
-        marketplace.acceptSignedOffer(bondId, buyer, 0, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, 0, 1 ether, exp, type(uint256).max, nonce, 0, sig);
     }
 
     function test_acceptSignedOffer_revert_invalidSignature() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
         // Signed by seller's key but claims buyer as the signer
-        bytes memory sig = _signOffer(SELLER_PK, bondId, 1 ether, exp, type(uint256).max, nonce, 0);
+        bytes memory sig = _signOffer(SELLER_PK, bondId, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
-        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0, sig);
     }
 
     function test_acceptSignedOffer_revert_expired() public {
@@ -706,7 +719,7 @@ contract CofferMarketplaceTest is Test {
         uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.ExpirationNotInFuture.selector);
-        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0, sig);
     }
 
     function test_acceptSignedOffer_revert_notOwner() public {
@@ -716,7 +729,7 @@ contract CofferMarketplaceTest is Test {
         vm.prank(buyer2);
         vm.expectRevert(CofferMarketplace.NotOwner.selector);
         marketplace.acceptSignedOffer(
-            bondId, buyer, 1 ether, uint64(block.timestamp + 1 days), type(uint256).max, nonce, 0, sig
+            bondId, buyer, 1 ether, 1 ether, uint64(block.timestamp + 1 days), type(uint256).max, nonce, 0, sig
         );
     }
 
@@ -728,11 +741,11 @@ contract CofferMarketplaceTest is Test {
 
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(seller, bondId);
-        bytes memory sig = _signOffer(SELLER_PK, bondId, 1 ether, exp, type(uint256).max, nonce, 0);
+        bytes memory sig = _signOffer(SELLER_PK, bondId, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.SameParty.selector);
-        marketplace.acceptSignedOffer(bondId, seller, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, seller, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0, sig);
     }
 
     function test_acceptSignedOffer_revert_notApproved() public {
@@ -743,11 +756,11 @@ contract CofferMarketplaceTest is Test {
 
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(buyer, bondId2);
-        bytes memory sig = _signOffer(BUYER_PK, bondId2, 1 ether, exp, type(uint256).max, nonce, 0);
+        bytes memory sig = _signOffer(BUYER_PK, bondId2, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0);
 
         vm.prank(seller2);
         vm.expectRevert(CofferMarketplace.MarketplaceNotApproved.selector);
-        marketplace.acceptSignedOffer(bondId2, buyer, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId2, buyer, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0, sig);
     }
 
     function test_acceptSignedOffer_revert_bondNotOutstanding() public {
@@ -759,7 +772,7 @@ contract CofferMarketplaceTest is Test {
         uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
-        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0, sig);
     }
 
     function test_acceptSignedOffer_revert_buyerWethDrained() public {
@@ -772,7 +785,7 @@ contract CofferMarketplaceTest is Test {
         uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0, sig);
     }
 
     function test_acceptSignedOffer_revert_buyerAllowanceRevoked() public {
@@ -785,7 +798,7 @@ contract CofferMarketplaceTest is Test {
         uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0, sig);
     }
 
     function test_acceptSignedOffer_revert_replay() public {
@@ -796,12 +809,12 @@ contract CofferMarketplaceTest is Test {
 
         // First accept: seller sells
         vm.prank(seller);
-        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0, sig);
 
         // Second accept with same signature: nonce was auto-incremented, so it is revoked
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.OfferRevoked.selector);
-        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0, sig);
     }
 
     function test_acceptSignedOffer_revert_globallyCancelled() public {
@@ -814,16 +827,16 @@ contract CofferMarketplaceTest is Test {
         uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.OfferRevoked.selector);
-        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, 1 ether, 1 ether, exp, type(uint256).max, nonce, 0, sig);
     }
 
     function test_acceptSignedOffer_amountOneWei() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
-        bytes memory sig = _signOffer(BUYER_PK, bondId, 1, exp, type(uint256).max, nonce, 0);
+        bytes memory sig = _signOffer(BUYER_PK, bondId, 1, 1 ether, exp, type(uint256).max, nonce, 0);
 
         vm.prank(seller);
-        marketplace.acceptSignedOffer(bondId, buyer, 1, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, 1, 1 ether, exp, type(uint256).max, nonce, 0, sig);
 
         assertEq(bondNft.ownerOf(bondId), buyer);
         assertEq(weth.balanceOf(seller), 1);

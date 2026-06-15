@@ -28,10 +28,11 @@ contract VerifyCancelSemanticsTest is Test {
     uint256 public bondA;
     uint256 public bondB;
 
-    bytes32 constant LISTING_TYPEHASH =
-        keccak256("Listing(uint256 bondId,uint128 price,uint64 expiration,uint256 nonce,uint256 globalNonce)");
+    bytes32 constant LISTING_TYPEHASH = keccak256(
+        "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+    );
     bytes32 constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -41,30 +42,35 @@ contract VerifyCancelSemanticsTest is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("2")),
+                keccak256(bytes("3")),
                 block.chainid,
                 address(marketplace)
             )
         );
     }
 
-    function _signListing(uint256 pk, uint256 bId, uint128 pr, uint64 exp, uint256 nonce, uint256 gNonce)
+    function _signListing(uint256 pk, uint256 bId, uint128 pr, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
         internal
         view
         returns (bytes memory)
     {
-        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, exp, nonce, gNonce));
+        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, mat, exp, nonce, gNonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
 
-    function _signOffer(uint256 pk, uint256 bId, uint128 wAmt, uint64 exp, uint256 maxF, uint256 nonce, uint256 gNonce)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, exp, maxF, nonce, gNonce));
+    function _signOffer(
+        uint256 pk,
+        uint256 bId,
+        uint128 wAmt,
+        uint128 mat,
+        uint64 exp,
+        uint256 maxF,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes memory) {
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, maxF, nonce, gNonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
@@ -98,10 +104,10 @@ contract VerifyCancelSemanticsTest is Test {
     function test_batchCancelRepeatedBondId_clearsPresignedListingQueue() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonceA = marketplace.sListingNonce(seller, bondA);
-        bytes memory sigA0 = _signListing(SELLER_PK, bondA, 1 ether, exp, nonceA, 0);
-        bytes memory sigA1 = _signListing(SELLER_PK, bondA, 0.5 ether, exp, nonceA + 1, 0);
+        bytes memory sigA0 = _signListing(SELLER_PK, bondA, 1 ether, 1 ether, exp, nonceA, 0);
+        bytes memory sigA1 = _signListing(SELLER_PK, bondA, 0.5 ether, 1 ether, exp, nonceA + 1, 0);
         uint256 nonceB = marketplace.sListingNonce(seller, bondB);
-        bytes memory sigB = _signListing(SELLER_PK, bondB, 2 ether, exp, nonceB, 0);
+        bytes memory sigB = _signListing(SELLER_PK, bondB, 2 ether, 1 ether, exp, nonceB, 0);
 
         uint256[] memory ids = new uint256[](2);
         ids[0] = bondA;
@@ -112,14 +118,14 @@ contract VerifyCancelSemanticsTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
-        marketplace.buySignedListing{value: 1 ether}(bondA, seller, 1 ether, exp, nonceA, 0, 0, sigA0);
+        marketplace.buySignedListing{value: 1 ether}(bondA, seller, 1 ether, 1 ether, exp, nonceA, 0, 0, sigA0);
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
-        marketplace.buySignedListing{value: 0.5 ether}(bondA, seller, 0.5 ether, exp, nonceA + 1, 0, 0, sigA1);
+        marketplace.buySignedListing{value: 0.5 ether}(bondA, seller, 0.5 ether, 1 ether, exp, nonceA + 1, 0, 0, sigA1);
 
         vm.prank(buyer);
-        marketplace.buySignedListing{value: 2 ether}(bondB, seller, 2 ether, exp, nonceB, 0, 0, sigB);
+        marketplace.buySignedListing{value: 2 ether}(bondB, seller, 2 ether, 1 ether, exp, nonceB, 0, 0, sigB);
         assertEq(bondNft.ownerOf(bondB), buyer, "bond B listing was untouched by the bond A queue clear");
         assertEq(bondNft.ownerOf(bondA), seller, "bond A was never sold");
     }
@@ -129,10 +135,10 @@ contract VerifyCancelSemanticsTest is Test {
     function test_batchCancelRepeatedBondId_clearsPresignedOfferQueue() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonceA = marketplace.sOfferNonce(buyer, bondA);
-        bytes memory sigA0 = _signOffer(BUYER_PK, bondA, 1 ether, exp, type(uint256).max, nonceA, 0);
-        bytes memory sigA1 = _signOffer(BUYER_PK, bondA, 0.5 ether, exp, type(uint256).max, nonceA + 1, 0);
+        bytes memory sigA0 = _signOffer(BUYER_PK, bondA, 1 ether, 1 ether, exp, type(uint256).max, nonceA, 0);
+        bytes memory sigA1 = _signOffer(BUYER_PK, bondA, 0.5 ether, 1 ether, exp, type(uint256).max, nonceA + 1, 0);
         uint256 nonceB = marketplace.sOfferNonce(buyer, bondB);
-        bytes memory sigB = _signOffer(BUYER_PK, bondB, 2 ether, exp, type(uint256).max, nonceB, 0);
+        bytes memory sigB = _signOffer(BUYER_PK, bondB, 2 ether, 1 ether, exp, type(uint256).max, nonceB, 0);
 
         uint256[] memory ids = new uint256[](2);
         ids[0] = bondA;
@@ -143,14 +149,14 @@ contract VerifyCancelSemanticsTest is Test {
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.OfferRevoked.selector);
-        marketplace.acceptSignedOffer(bondA, buyer, 1 ether, exp, type(uint256).max, nonceA, 0, sigA0);
+        marketplace.acceptSignedOffer(bondA, buyer, 1 ether, 1 ether, exp, type(uint256).max, nonceA, 0, sigA0);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.OfferRevoked.selector);
-        marketplace.acceptSignedOffer(bondA, buyer, 0.5 ether, exp, type(uint256).max, nonceA + 1, 0, sigA1);
+        marketplace.acceptSignedOffer(bondA, buyer, 0.5 ether, 1 ether, exp, type(uint256).max, nonceA + 1, 0, sigA1);
 
         vm.prank(seller);
-        marketplace.acceptSignedOffer(bondB, buyer, 2 ether, exp, type(uint256).max, nonceB, 0, sigB);
+        marketplace.acceptSignedOffer(bondB, buyer, 2 ether, 1 ether, exp, type(uint256).max, nonceB, 0, sigB);
         assertEq(bondNft.ownerOf(bondB), buyer, "bond B offer was untouched by the bond A queue clear");
     }
 
@@ -159,7 +165,7 @@ contract VerifyCancelSemanticsTest is Test {
     function test_singleCancel_armsNextPresignedOffer() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonceA = marketplace.sOfferNonce(buyer, bondA);
-        bytes memory sigA1 = _signOffer(BUYER_PK, bondA, 0.5 ether, exp, type(uint256).max, nonceA + 1, 0);
+        bytes memory sigA1 = _signOffer(BUYER_PK, bondA, 0.5 ether, 1 ether, exp, type(uint256).max, nonceA + 1, 0);
 
         vm.prank(buyer);
         marketplace.cancelOffer(bondA);
@@ -167,7 +173,7 @@ contract VerifyCancelSemanticsTest is Test {
 
         // The pre-signed next-nonce offer is now live and the seller can take it.
         vm.prank(seller);
-        marketplace.acceptSignedOffer(bondA, buyer, 0.5 ether, exp, type(uint256).max, nonceA + 1, 0, sigA1);
+        marketplace.acceptSignedOffer(bondA, buyer, 0.5 ether, 1 ether, exp, type(uint256).max, nonceA + 1, 0, sigA1);
         assertEq(bondNft.ownerOf(bondA), buyer, "pre-signed next-nonce offer was armed by the cancel");
     }
 
@@ -178,8 +184,8 @@ contract VerifyCancelSemanticsTest is Test {
         uint256 gNonce = marketplace.sGlobalOfferNonce(buyer);
         uint256 nonceA = marketplace.sOfferNonce(buyer, bondA);
         uint256 nonceB = marketplace.sOfferNonce(buyer, bondB);
-        bytes memory sigA = _signOffer(BUYER_PK, bondA, 1 ether, exp, type(uint256).max, nonceA, gNonce);
-        bytes memory sigB = _signOffer(BUYER_PK, bondB, 2 ether, exp, type(uint256).max, nonceB, gNonce);
+        bytes memory sigA = _signOffer(BUYER_PK, bondA, 1 ether, 1 ether, exp, type(uint256).max, nonceA, gNonce);
+        bytes memory sigB = _signOffer(BUYER_PK, bondB, 2 ether, 1 ether, exp, type(uint256).max, nonceB, gNonce);
 
         vm.prank(buyer);
         marketplace.cancelAllOffers();
@@ -189,10 +195,10 @@ contract VerifyCancelSemanticsTest is Test {
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.OfferRevoked.selector);
-        marketplace.acceptSignedOffer(bondA, buyer, 1 ether, exp, type(uint256).max, nonceA, gNonce, sigA);
+        marketplace.acceptSignedOffer(bondA, buyer, 1 ether, 1 ether, exp, type(uint256).max, nonceA, gNonce, sigA);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.OfferRevoked.selector);
-        marketplace.acceptSignedOffer(bondB, buyer, 2 ether, exp, type(uint256).max, nonceB, gNonce, sigB);
+        marketplace.acceptSignedOffer(bondB, buyer, 2 ether, 1 ether, exp, type(uint256).max, nonceB, gNonce, sigB);
     }
 }

@@ -143,10 +143,11 @@ contract CofferMarketplaceAuditTest is Test {
 
     uint256 public bondId;
 
-    bytes32 constant LISTING_TYPEHASH =
-        keccak256("Listing(uint256 bondId,uint128 price,uint64 expiration,uint256 nonce,uint256 globalNonce)");
+    bytes32 constant LISTING_TYPEHASH = keccak256(
+        "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+    );
     bytes32 constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -156,30 +157,35 @@ contract CofferMarketplaceAuditTest is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("2")),
+                keccak256(bytes("3")),
                 block.chainid,
                 address(marketplace)
             )
         );
     }
 
-    function _signListing(uint256 pk, uint256 bId, uint128 pr, uint64 exp, uint256 nonce, uint256 gNonce)
+    function _signListing(uint256 pk, uint256 bId, uint128 pr, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
         internal
         view
         returns (bytes memory)
     {
-        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, exp, nonce, gNonce));
+        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, mat, exp, nonce, gNonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
 
-    function _signOffer(uint256 pk, uint256 bId, uint128 wAmt, uint64 exp, uint256 maxF, uint256 nonce, uint256 gNonce)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, exp, maxF, nonce, gNonce));
+    function _signOffer(
+        uint256 pk,
+        uint256 bId,
+        uint128 wAmt,
+        uint128 mat,
+        uint64 exp,
+        uint256 maxF,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes memory) {
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, maxF, nonce, gNonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
@@ -224,7 +230,8 @@ contract CofferMarketplaceAuditTest is Test {
 
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, nonce, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, mat, exp, nonce, 0);
 
         uint256 profit = uint256(maturityValue) - uint256(price);
         uint256 trueFee = (profit * bps) / 10000;
@@ -232,7 +239,7 @@ contract CofferMarketplaceAuditTest is Test {
 
         vm.deal(buyer, total);
         vm.prank(buyer);
-        marketplace.buySignedListing{value: total}(bondId, seller, price, exp, nonce, 0, trueFee, sig);
+        marketplace.buySignedListing{value: total}(bondId, seller, price, mat, exp, nonce, 0, trueFee, sig);
 
         assertEq(bondNft.ownerOf(bondId), buyer);
     }
@@ -275,12 +282,13 @@ contract CofferMarketplaceAuditTest is Test {
         if (tamperedExp == exp) return;
 
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, 1 ether, exp, nonce, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, 1 ether, mat, exp, nonce, 0);
 
         // The signature is over exp, so presenting it for a different expiration fails verification
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
-        marketplace.buySignedListing{value: 0}(bondId, seller, 1 ether, tamperedExp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 0}(bondId, seller, 1 ether, mat, tamperedExp, nonce, 0, 0, sig);
     }
 
     function testFuzz_listingSigTampered_price(uint128 tamperedPrice) public {
@@ -289,11 +297,12 @@ contract CofferMarketplaceAuditTest is Test {
 
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, 1 ether, exp, nonce, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, 1 ether, mat, exp, nonce, 0);
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
-        marketplace.buySignedListing{value: 0}(bondId, seller, tamperedPrice, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 0}(bondId, seller, tamperedPrice, mat, exp, nonce, 0, 0, sig);
     }
 
     function testFuzz_offerReplay_afterAccept(uint128 offerAmount) public {
@@ -301,14 +310,15 @@ contract CofferMarketplaceAuditTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
 
         uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
-        bytes memory sig = _signOffer(BUYER_PK, bondId, offerAmount, exp, type(uint256).max, nonce, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signOffer(BUYER_PK, bondId, offerAmount, mat, exp, type(uint256).max, nonce, 0);
 
         vm.prank(seller);
-        marketplace.acceptSignedOffer(bondId, buyer, offerAmount, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, offerAmount, mat, exp, type(uint256).max, nonce, 0, sig);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.OfferRevoked.selector);
-        marketplace.acceptSignedOffer(bondId, buyer, offerAmount, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, offerAmount, mat, exp, type(uint256).max, nonce, 0, sig);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -344,14 +354,15 @@ contract CofferMarketplaceAuditTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
         uint256 gNonce = marketplace.sGlobalListingNonce(seller);
-        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, nonce, gNonce);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, mat, exp, nonce, gNonce);
 
         vm.prank(seller);
         marketplace.cancelAllListings();
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, exp, nonce, gNonce, 0, sig);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, mat, exp, nonce, gNonce, 0, sig);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -368,7 +379,8 @@ contract CofferMarketplaceAuditTest is Test {
 
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, nonce, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, mat, exp, nonce, 0);
 
         uint256 profit = uint256(maturityValue) - uint256(price);
         uint256 trueFee = (profit * 800) / 10000;
@@ -376,7 +388,7 @@ contract CofferMarketplaceAuditTest is Test {
 
         vm.deal(buyer, total + 10 ether);
         vm.prank(buyer);
-        marketplace.buySignedListing{value: total}(bondId, seller, price, exp, nonce, 0, trueFee, sig);
+        marketplace.buySignedListing{value: total}(bondId, seller, price, mat, exp, nonce, 0, trueFee, sig);
 
         assertEq(bondNft.ownerOf(bondId), buyer);
     }
@@ -391,10 +403,11 @@ contract CofferMarketplaceAuditTest is Test {
 
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, nonce, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, mat, exp, nonce, 0);
 
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, mat, exp, nonce, 0, 0, sig);
 
         assertEq(bondNft.ownerOf(bondId), buyer);
     }
@@ -425,7 +438,7 @@ contract CofferMarketplaceAuditTest is Test {
         coffer.setMaturityValue(bondId, 5 ether);
 
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, 1 ether, exp, nonce, 0);
+        bytes memory sig = _signListing(SELLER_PK, bondId, 1 ether, 5 ether, exp, nonce, 0);
 
         coffer.setMaturityValue(bondId, 0);
         vm.warp(block.timestamp + warpSeconds);
@@ -436,7 +449,7 @@ contract CofferMarketplaceAuditTest is Test {
         } else {
             vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
         }
-        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, 5 ether, exp, nonce, 0, 0, sig);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -450,11 +463,12 @@ contract CofferMarketplaceAuditTest is Test {
 
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(seller, bondId);
-        bytes memory sig = _signOffer(SELLER_PK, bondId, 1 ether, exp, type(uint256).max, nonce, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signOffer(SELLER_PK, bondId, 1 ether, mat, exp, type(uint256).max, nonce, 0);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.SameParty.selector);
-        marketplace.acceptSignedOffer(bondId, seller, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, seller, 1 ether, mat, exp, type(uint256).max, nonce, 0, sig);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -470,12 +484,13 @@ contract CofferMarketplaceAuditTest is Test {
 
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, nonce, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, mat, exp, nonce, 0);
 
         uint256 expectedFee = (uint256(4 ether) * 800) / 10000;
         vm.prank(buyer);
         marketplace.buySignedListing{value: uint256(price) + expectedFee}(
-            bondId, seller, price, exp, nonce, 0, expectedFee, sig
+            bondId, seller, price, mat, exp, nonce, 0, expectedFee, sig
         );
 
         uint256 mktBalance = address(marketplace).balance;
@@ -507,8 +522,9 @@ contract CofferMarketplaceAuditTest is Test {
 
         uint256 wethBefore = weth.balanceOf(address(cSeller));
 
+        uint128 mat = coffer.maturityValues(cBond);
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(cBond, address(cSeller), price, exp, nonce, 0, 0, "");
+        marketplace.buySignedListing{value: price}(cBond, address(cSeller), price, mat, exp, nonce, 0, 0, "");
 
         assertEq(weth.balanceOf(address(cSeller)) - wethBefore, price);
         assertEq(bondNft.ownerOf(cBond), buyer);
@@ -522,7 +538,8 @@ contract CofferMarketplaceAuditTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
 
         // Order signed at the current nonce 0
-        bytes memory sigOld = _signListing(SELLER_PK, bondId, 1 ether, exp, 0, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sigOld = _signListing(SELLER_PK, bondId, 1 ether, mat, exp, 0, 0);
 
         // Seller cancels, bumping the per-bond nonce to 1
         vm.prank(seller);
@@ -532,12 +549,13 @@ contract CofferMarketplaceAuditTest is Test {
         // The old order at nonce 0 is no longer fillable
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
-        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, exp, 0, 0, 0, sigOld);
+        marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, mat, exp, 0, 0, 0, sigOld);
 
         // A fresh order signed at nonce 1 fills
-        bytes memory sigNew = _signListing(SELLER_PK, bondId, 2 ether, exp, 1, 0);
+        uint128 mat2 = coffer.maturityValues(bondId);
+        bytes memory sigNew = _signListing(SELLER_PK, bondId, 2 ether, mat2, exp, 1, 0);
         vm.prank(buyer);
-        marketplace.buySignedListing{value: 2 ether}(bondId, seller, 2 ether, exp, 1, 0, 0, sigNew);
+        marketplace.buySignedListing{value: 2 ether}(bondId, seller, 2 ether, mat2, exp, 1, 0, 0, sigNew);
         assertEq(bondNft.ownerOf(bondId), buyer);
     }
 
@@ -571,14 +589,15 @@ contract CofferMarketplaceAuditTest is Test {
 
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, nonce, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, mat, exp, nonce, 0);
 
         // With no profit and no fixed component, the fee is exactly zero.
         vm.deal(buyer, uint256(price) + 1 ether);
 
         uint256 mktBefore = address(marketplace).balance;
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, mat, exp, nonce, 0, 0, sig);
 
         assertEq(address(marketplace).balance - mktBefore, 0);
     }
@@ -601,11 +620,12 @@ contract CofferMarketplaceAuditTest is Test {
 
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, 1 ether, exp, nonce, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sig = _signListing(SELLER_PK, bondId, 1 ether, mat, exp, nonce, 0);
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
-        marketplace2.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, exp, nonce, 0, 0, sig);
+        marketplace2.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, mat, exp, nonce, 0, 0, sig);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -620,13 +640,13 @@ contract CofferMarketplaceAuditTest is Test {
 
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, price, exp, nonce, 0);
+        bytes memory sig = _signListing(SELLER_PK, bondId, price, 1 ether, exp, nonce, 0);
 
         coffer.setMaturityValue(bondId, 0);
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.BondNotOutstanding.selector);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, 1 ether, exp, nonce, 0, 0, sig);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -646,9 +666,10 @@ contract CofferMarketplaceAuditTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(address(cSeller), cBond);
 
+        uint128 mat = coffer.maturityValues(cBond);
         vm.prank(buyer);
         uint256 gasBefore = gasleft();
-        marketplace.buySignedListing{value: price}(cBond, address(cSeller), price, exp, nonce, 0, 0, "");
+        marketplace.buySignedListing{value: price}(cBond, address(cSeller), price, mat, exp, nonce, 0, 0, "");
         uint256 gasUsed = gasBefore - gasleft();
 
         assertTrue(gasUsed < 500_000, "Returndata bomb caused excessive gas");
@@ -672,8 +693,9 @@ contract CofferMarketplaceAuditTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(address(cSeller), cBond);
 
+        uint128 mat = coffer.maturityValues(cBond);
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(cBond, address(cSeller), price, exp, nonce, 0, 0, "");
+        marketplace.buySignedListing{value: price}(cBond, address(cSeller), price, mat, exp, nonce, 0, 0, "");
 
         assertEq(bondNft.ownerOf(cBond), buyer);
         assertEq(weth.balanceOf(address(cSeller)), price);
@@ -691,23 +713,24 @@ contract CofferMarketplaceAuditTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
 
-        bytes memory sigCurrent = _signListing(SELLER_PK, bondId, price, exp, nonce, 0);
-        bytes memory sigAhead = _signListing(SELLER_PK, bondId, price, exp, nonce + 1, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory sigCurrent = _signListing(SELLER_PK, bondId, price, mat, exp, nonce, 0);
+        bytes memory sigAhead = _signListing(SELLER_PK, bondId, price, mat, exp, nonce + 1, 0);
 
         // A fill one nonce ahead is rejected
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, exp, nonce + 1, 0, 0, sigAhead);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, mat, exp, nonce + 1, 0, 0, sigAhead);
 
         // The fill at the current nonce succeeds and bumps the nonce
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, exp, nonce, 0, 0, sigCurrent);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, mat, exp, nonce, 0, 0, sigCurrent);
         assertEq(marketplace.sListingNonce(seller, bondId), nonce + 1);
 
         // A replay of the same signature now fails
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, exp, nonce, 0, 0, sigCurrent);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, mat, exp, nonce, 0, 0, sigCurrent);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -753,9 +776,10 @@ contract CofferMarketplaceAuditTest is Test {
 
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(brokeBuyer, noWethBondId);
+        uint128 mat = coffer.maturityValues(noWethBondId);
 
         bytes32 structHash = keccak256(
-            abi.encode(OFFER_TYPEHASH, noWethBondId, uint128(1 ether), exp, type(uint256).max, nonce, uint256(0))
+            abi.encode(OFFER_TYPEHASH, noWethBondId, uint128(1 ether), mat, exp, type(uint256).max, nonce, uint256(0))
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(brokePk, digest);
@@ -763,7 +787,7 @@ contract CofferMarketplaceAuditTest is Test {
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
-        marketplace.acceptSignedOffer(noWethBondId, brokeBuyer, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(noWethBondId, brokeBuyer, 1 ether, mat, exp, type(uint256).max, nonce, 0, sig);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -780,18 +804,24 @@ contract CofferMarketplaceAuditTest is Test {
         // 1. buySignedListing (ETH profit fee). maturity 5 ether, price 1 ether, profit 4 ether,
         //    800 bps gives a 0.32 ether ETH fee.
         uint256 listNonce = marketplace.sListingNonce(seller, bondId);
-        bytes memory listSig = _signListing(SELLER_PK, bondId, 1 ether, exp, listNonce, 0);
+        uint128 mat = coffer.maturityValues(bondId);
+        bytes memory listSig = _signListing(SELLER_PK, bondId, 1 ether, mat, exp, listNonce, 0);
         vm.deal(buyer, 2 ether);
         vm.prank(buyer);
-        marketplace.buySignedListing{value: 1.32 ether}(bondId, seller, 1 ether, exp, listNonce, 0, 0.32 ether, listSig);
+        marketplace.buySignedListing{value: 1.32 ether}(
+            bondId, seller, 1 ether, mat, exp, listNonce, 0, 0.32 ether, listSig
+        );
 
         // 2. acceptSignedOffer (WETH fee)
         uint256 offerBondId = bondNft.mintTo(seller, address(coffer));
         coffer.setMaturityValue(offerBondId, 5 ether);
         uint256 offerNonce = marketplace.sOfferNonce(buyer, offerBondId);
-        bytes memory offerSig = _signOffer(BUYER_PK, offerBondId, 1 ether, exp, type(uint256).max, offerNonce, 0);
+        uint128 mat2 = coffer.maturityValues(offerBondId);
+        bytes memory offerSig = _signOffer(BUYER_PK, offerBondId, 1 ether, mat2, exp, type(uint256).max, offerNonce, 0);
         vm.prank(seller);
-        marketplace.acceptSignedOffer(offerBondId, buyer, 1 ether, exp, type(uint256).max, offerNonce, 0, offerSig);
+        marketplace.acceptSignedOffer(
+            offerBondId, buyer, 1 ether, mat2, exp, type(uint256).max, offerNonce, 0, offerSig
+        );
 
         // Claim ETH, only sweeps ETH, WETH unchanged
         uint256 ethBefore = address(marketplace).balance;
@@ -873,7 +903,7 @@ contract ReentrantSellerFallback {
 
     receive() external payable {
         marketplace.buySignedListing{value: 1 ether}(
-            1, address(this), 1 ether, uint64(block.timestamp + 365 days), 0, 0, 0, hex""
+            1, address(this), 1 ether, 1 ether, uint64(block.timestamp + 365 days), 0, 0, 0, hex""
         );
     }
 }
