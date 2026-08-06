@@ -2,6 +2,9 @@
 cache/
 out/
 
+# Lint tooling (solhint is pinned in package.json, installed with npm ci)
+node_modules/
+
 # Ignores development broadcast logs
 /broadcast
 /broadcast/*/31337/

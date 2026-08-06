@@ -31,6 +31,7 @@ A bond is considered **outstanding** while its `bondMaturityValue != 0`. The mar
 | `I_WETH` | `address` | WETH token contract |
 | `I_COFFER_BOND_NFT` | `address` | CofferBondNft contract |
 | `BPS_DENOMINATOR` | `uint16 constant = 10000` | Basis points denominator (100% = 10000) |
+| `SELLER_PAYOUT_GAS_LIMIT` | `uint256 constant = 100000` | Gas forwarded to the seller on an ETH payout, above which the seller is paid in WETH instead |
 
 ### Storage
 
@@ -49,7 +50,7 @@ A bond is considered **outstanding** while its `bondMaturityValue != 0`. The mar
 | Interface | Purpose |
 |---|---|
 | `ICofferBondNft` | The marketplace uses `ownerOf`, `cofferOf`, `isApprovedForAll`, and `safeTransferFrom` |
-| `ICoffer` | Query bond conditions via `sHolderConditions`, which gives maturity value, duration, start timestamp, and a consensus flag the marketplace ignores |
+| `ICoffer` | Query bond conditions via `sHolderConditions`, which gives maturity value, duration, start timestamp, and whether the bond's consensus withdrawal has been closed, plus `totalConsensusReserved` for the value the Coffer holds back for closed bonds. Trades are gated on maturity value alone, the rest is exposed through `getBondCollateral` for pricing |
 | `IWETH` | ERC-20 operations for Wrapped ETH, namely `balanceOf`, `allowance`, `transfer`, `transferFrom`, and `deposit` |
 
 ---
@@ -61,6 +62,8 @@ A bond is considered **outstanding** while its `bondMaturityValue != 0`. The mar
 1. Seller signs an EIP-712 `Listing(bondId, price, maturityValue, expiration, nonce, globalNonce)` message with their wallet, using the current on-chain per-bond nonce. Signing costs nothing.
 2. The signed listing is posted to the off-chain order book. There is no on-chain registration step.
 3. Buyer calls `buySignedListing()` passing the listing parameters and the seller's signature. The contract rejects self-trades and a zero price, checks the signed per-bond and global nonces against the current ones, checks the seller still owns the bond and has the marketplace approved, checks the order is unexpired, verifies the signature against the seller, checks the bond is outstanding and that the signed `maturityValue` equals the bond's live maturity value (reverting `MaturityValueMismatch` otherwise), computes the profit-based fee (profit is the maturity value minus the price when positive, fee is `profit * sListingFeeBps / 10000`, and the call reverts `FeeExceedsMax` if the fee exceeds the buyer's `_maxFee` parameter), requires the sent ETH to cover price plus fee, bumps the nonce to prevent replay, and executes the trade. The NFT goes to the buyer, the ETH price goes to the seller (with a WETH deposit and transfer fallback if the seller rejects ETH), the fee stays in the marketplace, and excess ETH is refunded to the buyer.
+
+The ETH payout forwards at most `SELLER_PAYOUT_GAS_LIMIT` (100,000) gas to the seller. A seller whose `receive` costs more than that, or burns gas deliberately, is paid in WETH through the fallback instead of failing the trade, and the bound keeps the fallback affordable at an ordinary gas limit. Because a seller can change what its `receive` does between a buyer's gas estimate and inclusion, buyers should submit fills with roughly 175,000 gas of headroom above the estimate, which covers the bounded payout plus the WETH fallback.
 
 ### Offers (WETH)
 
@@ -86,7 +89,7 @@ A bond is considered **outstanding** while its `bondMaturityValue != 0`. The mar
 - **CEI pattern.** The per-bond nonce is bumped before any external token or NFT transfers.
 - **ReentrancyGuard.** Applied to `buySignedListing` and `acceptSignedOffer`.
 - **Bond outstanding check.** Every trade verifies the bond's maturity value is non-zero.
-- **Two-step ownership transfer.** `Ownable2Step` prevents accidental transfer to the wrong address. Renouncing ownership is permanently disabled, so the owner role can never be lost and fees can never become permanently unclaimable.
+- **Two-step ownership transfer.** `Ownable2Step` prevents accidental transfer to the wrong address. Renouncing ownership is permanently disabled, so the owner can never be set to the zero address, which would otherwise freeze fee configuration and lock accrued fees in a non-upgradeable contract.
 
 ### Restrictions
 
@@ -133,6 +136,39 @@ The signed `maxFee` field of an Offer is passed to `acceptSignedOffer` as the `m
 
 The signed `maturityValue` must equal the bond's live maturity (`getBondData(bondId)` returns it) at the moment of signing. It is re-checked on-chain at fill against the live value: if the bond's maturity changed after signing, for example because the holder partially withdrew, the fill reverts `MaturityValueMismatch`. This binds the price the maker committed to the bond value they signed against, so a counterparty cannot collapse the bond and still settle. The order book and signing client must snapshot the current maturity into the order and re-quote and re-sign whenever it changes.
 
+### Assessing a bond before quoting a price
+
+The maturity value binds the **size** of a claim, not its **quality**. A fill checks that the signed
+maturity value equals the live one and nothing else about the backing, so two bonds carrying the same
+maturity value can settle very differently. `getBondCollateral(bondId)` returns the Coffer state that
+decides which one you are buying, in a single call.
+
+- **`cofferBalance`** is what the Coffer can pay out right now. A Coffer whose validator is still
+  staked holds only a fraction of what its outstanding bonds are worth, and the rest arrives from the
+  consensus layer later.
+- **`totalConsensusReserved`** is the value the Coffer holds back for bonds whose consensus withdrawal
+  has already been closed. It is **senior**. A bond whose own `consensusWithdrawClosed` is false can
+  only draw against `cofferBalance - totalConsensusReserved`, so a well funded Coffer can still leave
+  an open bond short.
+- **`consensusWithdrawClosed`** says whether this bond is one of the senior ones. A closed bond draws
+  against the whole balance. Closing is what starts the consensus withdrawal, so a closed bond is
+  typically waiting on funds in transit, days for a partial withdrawal and longer for a full validator
+  exit, while holding a senior claim once they arrive.
+
+Three consequences worth pricing in:
+
+- Settlement after funds arrive is first come first served among closed bonds, and a closed bond can
+  draw against value another closed bond reserved. If less arrives than the total reserved, the
+  earlier claimant is paid in full and a later one is paid partially.
+- A partial claim does not fail. It lowers the bond's maturity value by the amount paid and leaves the
+  bond live for the remainder, which also invalidates any order signed against the old value.
+- The consensus withdrawal can be triggered only once per bond, ever. A buyer inherits that, so a bond
+  whose withdrawal was already closed cannot be re-triggered by its new owner.
+
+The marketplace does not surface validator-level conditions such as `exitAllowed`, `issueSize` or
+`outstandingBonds`. Read `sValidatorConditions()` directly on the `cofferAddress` the view returns if
+you need them.
+
 ### Selling via Listing
 
 ```
@@ -177,12 +213,37 @@ A fill requires the signed nonce to equal the current on-chain nonce, and every 
 - **Recovery from a pre-signed queue.** If a maker violated the signing rule and pre-signed k consecutive nonces for one bond, a single cancel only advances the nonce by one and arms the next pre-signed order. The backend must clear the whole queue in one transaction by repeating the bond id, for example `cancelListings([A, A])` for k = 2, or the bond id repeated k times in general. The nonce advances past every pre-signed value atomically, with no window in which the next order is fillable, and no other bond is touched. `cancelOffers` works the same for offers.
 - **Re-sync after every cancel or fill.** The backend re-reads `sListingNonce`, `sGlobalListingNonce`, `sOfferNonce`, and `sGlobalOfferNonce`, or indexes the cancel and trade events, and drops every stored order whose signed nonces no longer match the chain. The UI then refreshes what it displays as open.
 
+### Screening orders and sizing fills
+
+A fill runs code the maker controls, at three points. The ERC-1271 `isValidSignature` check runs on a contract-wallet maker on both paths, before anything moves, and receives all the gas remaining at that point. `onERC721Received` runs on a contract offerer when an offer is accepted, after the WETH has already moved, and also receives all the gas remaining. The seller's `receive` on a listing payout is the one bounded case, capped at `SELLER_PAYOUT_GAS_LIMIT` with the WETH fallback behind it, see Listings (ETH) under How the Marketplace Works.
+
+The two unbounded points mean an order can be written so that every attempt to fill it consumes the taker's whole gas limit and then fails, leaving the order live for the next taker. What such an order cannot do is settle on terms the taker did not agree to. Signature verification precedes every transfer, the digest binds every field of the order, and every failure path reverts the entire fill including the nonce bump. The exposure is gas, and its ceiling is the limit the taker submitted.
+
+The two sides are not symmetric. A listing's maker owns the bond and has approved the marketplace, both checked before their code runs. An offer's maker is checked for nothing beforehand, and their WETH balance and allowance are not read until the transfers, so an offerer holding no WETH and granting no allowance still runs code inside a seller's accept. Posting an offer costs nothing and keeping it alive costs nothing.
+
+The order book carries this, not the contract.
+
+- **Judge a simulation by the gas it consumes, not by whether it reverted.** Ordinary failures are cheap. A missing approval, a stale nonce, a maturity value that moved, or an expired order all revert with a named error well under 50,000 gas and belong to normal staleness handling. A poisoned order consumes everything it is given. Reading consumption out of a failing call needs `debug_traceCall` or an equivalent tracing call, because `eth_estimateGas` returns a number only when the call succeeds.
+- **Tell an expensive wallet from a burner by simulating twice at different ceilings.** Some contract wallets legitimately cost hundreds of thousands of gas to verify, so a high figure on its own proves nothing. A genuine verification cost is flat across both ceilings. A burn tracks whatever ceiling it is given.
+- **Screen successes as well as failures.** Maker code can burn gas and still return a valid result, which settles the trade and takes the taker's gas anyway. An order estimating far above a known good order on the same path deserves the same treatment as one that fails.
+- **Simulate on the way out, not only at ingest.** ERC-1271 validity is revocable and maker code can change what it does between two calls, so re-simulate before serving an order and on the events that change a bond's state.
+- **Drop the maker, not only the order.** A maker that burns one taker's gas repeats it on every other bond it touches, on both sides.
+
+The taker's client carries the rest.
+
+- **The submitted gas limit is the maximum loss.** Compute it rather than passing a wallet default through, and do not raise it blindly when a fill fails. Listings (ETH) gives the headroom a fill needs above its estimate.
+- **Prefer private submission.** A maker can behave during the estimate and misbehave at inclusion, and a public mempool is what tells them when to switch.
+
+Two limits are worth stating plainly. Screening catches a maker that misbehaves every time, and it cannot catch one that behaves during the simulation and switches before inclusion, which is what the gas limit, private submission, and dropping the maker are for. And screening binds only for takers filling through this order book. The marketplace is permissionless, so an order that reached a taker some other way carries none of it.
+
 ### Risk Factors
 
 - **Pre-signed nonce queues.** Orders signed ahead of the current on-chain nonce arm one by one as fills and cancels advance it. The recovery procedure under Integration Considerations clears the whole queue in one transaction.
 - **Stale signatures.** A signed order stays fillable until it expires or the maker cancels on-chain, and re-signing off-chain does not revoke it. Short expirations bound how long a stale signature can linger.
 - **Admin fee changes.** The owner can change fee basis points at any time. A fill never pays above the buyer-signed `maxFee` on accept or the `_maxFee` parameter on buy, so a fee raise can make fills revert but can never charge more than the taker agreed to.
 - **Bond invalidation after signing.** A bond's maturity value can change after an order is signed, through a partial withdrawal, maturity, or early redemption. Fills against the old value revert `MaturityValueMismatch`, or `BondNotOutstanding` once the value is zeroed, and the order book must re-quote and re-sign against the live value.
+- **Maker-controlled code in a fill.** A contract wallet's signature check and a contract offerer's receiver hook both run with the taker's gas. An order can be written so that every fill attempt burns that gas and then fails, leaving the order live. No funds move and no fill settles on terms the taker did not agree to. See Screening orders and sizing fills.
+- **Settlement timing and seniority.** Equal maturity values do not mean equal assets. A bond may be waiting on funds in transit from the consensus layer, and a bond whose consensus withdrawal is still open ranks behind the Coffer's reserve for those that are closed. Read `getBondCollateral` before quoting, see Assessing a bond before quoting a price.
 
 ### Admin Operations
 
@@ -199,6 +260,7 @@ marketplace.acceptOwnership()             // step 2 of Ownable2Step
 ### View Functions
 
 - `getBondData(bondId)` returns the maturity value, duration, start timestamp, and coffer address.
+- `getBondCollateral(bondId)` returns the maturity value, whether the bond's consensus withdrawal is closed, the coffer address, the coffer's ETH balance, and the coffer's reserve for closed bonds. See Assessing a bond before quoting a price.
 - `sGlobalListingNonce(address)` is the global listing nonce for a seller, bumped by cancelAllListings.
 - `sListingNonce(address, bondId)` is the per-bond listing nonce for a seller.
 - `sGlobalOfferNonce(address)` is the global offer nonce for a buyer, bumped by cancelAllOffers.

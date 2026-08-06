@@ -652,8 +652,9 @@ contract CofferMarketplaceAuditTest is Test {
 
     // ═══════════════════════════════════════════════════════════════
     // PoC-3: Returndata bomb, gas cost constant
-    // The seller contract returns 300KB from its receive. _safeTransferETH skips the returndata
-    // copy, so the buy gas stays constant.
+    // The seller contract returns 100KB from its receive, which fits inside the gas the payout
+    // forwards, so the seller call succeeds and returns the payload. _safeTransferETH skips the
+    // returndata copy, so the buy gas stays constant.
     // Verdict: PASS (gas constant regardless of returndata size)
     // ═══════════════════════════════════════════════════════════════
 
@@ -675,6 +676,10 @@ contract CofferMarketplaceAuditTest is Test {
 
         assertTrue(gasUsed < 500_000, "Returndata bomb caused excessive gas");
         assertEq(bondNft.ownerOf(cBond), buyer);
+        // The seller call must have succeeded, otherwise the fill settled through the WETH
+        // fallback and never exercised the returndata path this test is about.
+        assertEq(address(cSeller).balance, price, "seller paid in ETH");
+        assertEq(weth.balanceOf(address(cSeller)), 0, "seller must not have been paid in WETH");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -879,7 +884,9 @@ contract Erc1271ReturndataBomber {
 
     receive() external payable {
         assembly {
-            return(0, 300000)
+            // 100KB fits inside the gas the seller payout forwards, so the call returns the
+            // payload instead of running out of gas building it.
+            return(0, 100000)
         }
     }
 }

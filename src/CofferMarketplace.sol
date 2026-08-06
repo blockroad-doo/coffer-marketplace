@@ -29,6 +29,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     // ───── Errors ─────
 
     error ZeroAddress();
+    error NotAContract();
     error ZeroPrice();
     error ZeroAmount();
     error NotOwner();
@@ -63,6 +64,12 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
     /// @notice Basis points denominator (100% = 10000)
     uint16 public constant BPS_DENOMINATOR = 10000;
+
+    /// @notice Gas forwarded to the seller when paying a listing price in ETH. A seller whose
+    ///         receive costs more than this is paid in WETH through the fallback instead. Takers
+    ///         should size the gas limit of a fill to cover this plus the WETH fallback, because
+    ///         the seller's receive can change between estimation and inclusion.
+    uint256 public constant SELLER_PAYOUT_GAS_LIMIT = 100_000;
 
     // ───── State ─────
 
@@ -112,8 +119,16 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     /// @param seller The seller address
     /// @param price The listing price in wei
     /// @param fee The ETH fee collected by the marketplace
+    /// @param nonce The per-bond listing nonce this fill consumed
+    /// @param globalNonce The seller's global listing nonce the order was signed at
     event ListingPurchased(
-        uint256 indexed bondId, address indexed buyer, address indexed seller, uint128 price, uint256 fee
+        uint256 indexed bondId,
+        address indexed buyer,
+        address indexed seller,
+        uint128 price,
+        uint256 fee,
+        uint256 nonce,
+        uint256 globalNonce
     );
 
     /// @notice Emitted when a single offer is cancelled
@@ -136,8 +151,16 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     /// @param seller The seller address
     /// @param wethAmount The WETH amount of the accepted offer
     /// @param fee The WETH fee collected by the marketplace
+    /// @param nonce The per-bond offer nonce this fill consumed
+    /// @param globalNonce The buyer's global offer nonce the order was signed at
     event OfferAccepted(
-        uint256 indexed bondId, address indexed buyer, address indexed seller, uint128 wethAmount, uint256 fee
+        uint256 indexed bondId,
+        address indexed buyer,
+        address indexed seller,
+        uint128 wethAmount,
+        uint256 fee,
+        uint256 nonce,
+        uint256 globalNonce
     );
 
     /// @notice Emitted when the fee recipient is updated
@@ -160,12 +183,20 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
     // ───── Constructor ─────
 
+    /// @notice Deploy the marketplace against a WETH token and a CofferBondNft collection
+    /// @param _weth The WETH token contract, must be a contract
+    /// @param _cofferBondNft The CofferBondNft contract, must be a contract
+    /// @param _owner The initial owner
+    /// @param _feeRecipient The address that receives claimed fees, may be an account or a contract
+    /// @dev The two token addresses are immutable and have no setter, so a wrong value is permanent.
+    ///      Requiring code at both rejects an address that holds none, which covers address(0) as
+    ///      well. It cannot tell a wrong contract from the right one, which is a deployment concern.
     constructor(address _weth, address _cofferBondNft, address _owner, address _feeRecipient)
         Ownable(_owner)
         EIP712("CofferMarketplace", "3")
     {
-        require(_weth != address(0), ZeroAddress());
-        require(_cofferBondNft != address(0), ZeroAddress());
+        require(_weth.code.length > 0, NotAContract());
+        require(_cofferBondNft.code.length > 0, NotAContract());
         require(_feeRecipient != address(0), ZeroAddress());
         I_WETH = _weth;
         I_COFFER_BOND_NFT = _cofferBondNft;
@@ -208,6 +239,12 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     ///      only from the buySignedListing fee, so the balance is the accrued fee. Any ETH force-fed by
     ///      selfdestruct or a coinbase payment is also paid to the fee recipient on claim. Per-trade
     ///      fees are auditable off-chain from the ListingPurchased and FeesClaimed events.
+    /// @dev The payout returns the recipient's revert reason to the caller, unlike the trade paths,
+    ///      which discard it. That is the useful behaviour for an owner who has to diagnose a claim
+    ///      that a recipient contract rejects. The cost is that a recipient which reverts with a
+    ///      large payload makes a failed claim expensive in gas, because the reason is copied into
+    ///      memory and memory grows quadratically. Nothing moves on that path and the balance stays
+    ///      claimable, so setFeeRecipient corrects it in one transaction.
     function claimFees() external onlyOwner {
         uint256 amount = address(this).balance;
         require(amount > 0, NothingToClaim());
@@ -355,7 +392,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
         ++sListingNonce[_seller][_bondId];
 
-        _executeBuy(_bondId, _seller, _price, fee, msg.value - total);
+        _executeBuy(_bondId, _seller, _price, fee, msg.value - total, _nonce, _globalNonce);
     }
 
     // ───── Offer Functions ─────
@@ -439,7 +476,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
         ++sOfferNonce[_buyer][_bondId];
 
-        _executeAccept(_bondId, _buyer, _wethAmount, fee);
+        _executeAccept(_bondId, _buyer, _wethAmount, fee, _nonce, _globalNonce);
     }
 
     // ───── View Functions ─────
@@ -458,6 +495,34 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         cofferAddress = ICofferBondNft(I_COFFER_BOND_NFT).cofferOf(_bondId);
         // slither-disable-next-line unused-return
         (maturityValue, duration, startTimestamp,) = ICoffer(cofferAddress).sHolderConditions(_bondId);
+    }
+
+    /// @notice Get a bond's claim size alongside the Coffer state that determines whether and when that
+    ///         claim can be paid. A trade is gated on maturity value alone, which is a claim size and not
+    ///         a statement about the backing, so quoting a price needs the rest of this data.
+    /// @param _bondId The bond token ID
+    /// @return maturityValue The bond maturity value, the size of the claim
+    /// @return consensusWithdrawClosed Whether this bond's consensus withdrawal has been closed. A closed bond
+    ///         claims against the Coffer's whole balance, an open one must leave totalConsensusReserved behind
+    /// @return cofferAddress The Coffer address, for reading validator-level conditions directly
+    /// @return cofferBalance The Coffer's ETH balance, what is available to claim against right now
+    /// @return totalConsensusReserved The Coffer's reserve for closed bonds, senior to every open bond
+    function getBondCollateral(uint256 _bondId)
+        external
+        view
+        returns (
+            uint128 maturityValue,
+            bool consensusWithdrawClosed,
+            address cofferAddress,
+            uint256 cofferBalance,
+            uint128 totalConsensusReserved
+        )
+    {
+        cofferAddress = ICofferBondNft(I_COFFER_BOND_NFT).cofferOf(_bondId);
+        // slither-disable-next-line unused-return
+        (maturityValue,,, consensusWithdrawClosed) = ICoffer(cofferAddress).sHolderConditions(_bondId);
+        cofferBalance = cofferAddress.balance;
+        totalConsensusReserved = ICoffer(cofferAddress).totalConsensusReserved();
     }
 
     // ───── Internal: Fee Math ─────
@@ -494,37 +559,63 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         require(block.timestamp <= _expiration, ExpirationNotInFuture()); // forge-lint: disable-line(block-timestamp)
     }
 
-    /// @notice Finalise a signed-listing purchase: NFT, ETH/WETH, refund, event.
+    /// @notice Finalise a signed-listing purchase: event, NFT, ETH/WETH, refund.
     /// @param _bondId The bond token ID
     /// @param _seller The seller address
     /// @param _price The listing price in wei
     /// @param _fee The ETH fee collected
     /// @param _excess Excess ETH to refund to buyer
-    function _executeBuy(uint256 _bondId, address _seller, uint128 _price, uint256 _fee, uint256 _excess) internal {
+    /// @param _nonce The consumed per-bond listing nonce, for the event
+    /// @param _globalNonce The seller's global listing nonce at signing, for the event
+    function _executeBuy(
+        uint256 _bondId,
+        address _seller,
+        uint128 _price,
+        uint256 _fee,
+        uint256 _excess,
+        uint256 _nonce,
+        uint256 _globalNonce
+    ) internal {
+        // The emit precedes every external call, so no callback from the transfers below can
+        // place its own log (a reentrant cancel, say) at a lower log index than the sale.
+        emit ListingPurchased(_bondId, msg.sender, _seller, _price, _fee, _nonce, _globalNonce);
+
         // slither-disable-next-line arbitrary-send-erc20,calls-loop
         ICofferBondNft(I_COFFER_BOND_NFT).safeTransferFrom(_seller, msg.sender, _bondId);
 
+        // The forwarded gas is bounded, so a seller whose receive burns gas cannot leave the
+        // WETH fallback that follows without enough gas to run.
         // slither-disable-next-line arbitrary-send-eth,calls-loop
-        bool okSeller = _safeTransferETH(_seller, _price);
+        bool okSeller = _safeTransferETH(_seller, _price, SELLER_PAYOUT_GAS_LIMIT);
         if (!okSeller) {
             IWETH(I_WETH).deposit{value: _price}();
             IERC20(I_WETH).safeTransfer(_seller, _price);
         }
 
         if (_excess > 0) {
+            // The refund pays the caller back, so an expensive receive here is self-paid and the
+            // leg forwards everything. gasleft() exceeds what remains at call time, so the EVM's
+            // 63/64 rule decides the forwarded amount.
             // slither-disable-next-line arbitrary-send-eth
-            require(_safeTransferETH(msg.sender, _excess), InsufficientPayment());
+            require(_safeTransferETH(msg.sender, _excess, gasleft()), InsufficientPayment());
         }
-
-        emit ListingPurchased(_bondId, msg.sender, _seller, _price, _fee);
     }
 
-    /// @notice Finalise a signed-offer acceptance: WETH checks, transfers, NFT, event.
+    /// @notice Finalise a signed-offer acceptance: WETH checks, event, transfers, NFT.
     /// @param _bondId The bond token ID
     /// @param _buyer The offerer address
     /// @param _wethAmount The WETH offer amount
     /// @param _fee The WETH fee collected
-    function _executeAccept(uint256 _bondId, address _buyer, uint128 _wethAmount, uint256 _fee) internal {
+    /// @param _nonce The consumed per-bond offer nonce, for the event
+    /// @param _globalNonce The buyer's global offer nonce at signing, for the event
+    function _executeAccept(
+        uint256 _bondId,
+        address _buyer,
+        uint128 _wethAmount,
+        uint256 _fee,
+        uint256 _nonce,
+        uint256 _globalNonce
+    ) internal {
         uint256 totalWeth = uint256(_wethAmount) + _fee;
         // slither-disable-next-line calls-loop
         // solhint-disable-next-line gas-strict-inequalities
@@ -532,6 +623,10 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         // slither-disable-next-line calls-loop
         // solhint-disable-next-line gas-strict-inequalities
         require(IWETH(I_WETH).allowance(_buyer, address(this)) >= totalWeth, InsufficientPayment());
+
+        // The emit precedes every external call, so no callback from the transfers below (the
+        // buyer's onERC721Received, say) can place its own log at a lower log index than the sale.
+        emit OfferAccepted(_bondId, _buyer, msg.sender, _wethAmount, _fee, _nonce, _globalNonce);
 
         // slither-disable-next-line arbitrary-send-erc20
         IERC20(I_WETH).safeTransferFrom(_buyer, msg.sender, _wethAmount);
@@ -542,30 +637,34 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
         // slither-disable-next-line calls-loop
         ICofferBondNft(I_COFFER_BOND_NFT).safeTransferFrom(msg.sender, _buyer, _bondId);
-
-        emit OfferAccepted(_bondId, _buyer, msg.sender, _wethAmount, _fee);
     }
 
     /// @notice Transfer ETH without copying returndata, preventing returndata bomb gas griefing.
     /// @dev Solidity's `addr.call{value: amount}("")` copies ALL returndata into memory.
-    ///      A malicious recipient can exploit this by returning a large payload (e.g., 300KB)
+    ///      A malicious recipient can exploit this by returning a large payload (e.g., 100KB)
     ///      from their receive/fallback function, causing quadratic memory expansion gas costs
     ///      charged to the caller. Using assembly with returndatasize 0 (the last two zeros in
-    ///      the call opcode: `call(gas, to, amount, 0, 0, 0, 0)`) tells the EVM to skip the
+    ///      the call opcode: `call(gasLimit, to, amount, 0, 0, 0, 0)`) tells the EVM to skip the
     ///      returndata copy entirely, making the gas cost constant regardless of what the
     ///      recipient returns.
+    /// @dev The immunity covers the paths that route through this helper, which are the seller
+    ///      payout and the buyer refund in _executeBuy. The fee claims deliberately do not, because
+    ///      they keep the recipient's revert reason instead. See claimFees.
     /// @param _to The address to transfer ETH to
     /// @param _amount The amount of ETH to transfer in wei
+    /// @param _gasLimit The gas forwarded to the recipient. The EVM caps the forwarded amount at
+    ///        63/64 of what remains and adds the 2300 value stipend on top, so a bounded value
+    ///        here bounds what a recipient can burn out of the caller's gas.
     /// @return success Whether the transfer succeeded
     // slither-disable-next-line assembly
-    function _safeTransferETH(address _to, uint256 _amount) internal returns (bool success) {
+    function _safeTransferETH(address _to, uint256 _amount, uint256 _gasLimit) internal returns (bool success) {
         // solhint-disable-next-line no-inline-assembly
         assembly {
             // call(gasLimit, to, value, inputOffset, inputSize, outputOffset, outputSize)
             // The final two zeros (outputOffset=0, outputSize=0) are critical:
             // they prevent the EVM from copying any returndata into memory,
             // which is what makes this immune to returndata bomb attacks.
-            success := call(gas(), _to, _amount, 0, 0, 0, 0)
+            success := call(_gasLimit, _to, _amount, 0, 0, 0, 0)
         }
     }
 }

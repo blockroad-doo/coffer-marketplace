@@ -3,17 +3,18 @@ pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
+import {MockBondNft, MockWETH} from "./CofferMarketplace.t.sol";
 
-/// @notice Regression test for audit finding M-01: renounceOwnership must be permanently disabled,
-///         while the two-step ownership transfer must still work. The constructor only needs
-///         non-zero WETH and bond-NFT addresses, so placeholders suffice (no trading here).
+/// @notice renounceOwnership is permanently disabled, while the two-step ownership transfer still
+///         works. No trading happens here, but the constructor requires code at both token
+///         addresses, so the mocks are deployed rather than passing placeholder addresses.
 contract VerifyRenounceDisabledTest is Test {
     CofferMarketplace public marketplace;
     address public mpOwner = makeAddr("mpOwner");
     address public feeRecipient = makeAddr("feeRecipient");
 
     function setUp() public {
-        marketplace = new CofferMarketplace(makeAddr("weth"), makeAddr("bondNft"), mpOwner, feeRecipient);
+        marketplace = new CofferMarketplace(address(new MockWETH()), address(new MockBondNft()), mpOwner, feeRecipient);
     }
 
     function test_renounceOwnership_revertsForOwner() public {

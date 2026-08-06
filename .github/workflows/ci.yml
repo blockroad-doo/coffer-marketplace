@@ -17,11 +17,17 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          version: v1.7.1
           cache: false
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
       - name: Install solhint
-        run: npm i -g solhint
+        run: npm ci
 
       - name: Run lint
         run: make lint
@@ -37,7 +43,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          version: v1.7.1
           cache: false
 
       - name: Build
@@ -54,7 +60,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          version: v1.7.1
           cache: false
 
       - name: Build for Slither
@@ -76,7 +82,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: stable
+          version: v1.7.1
           cache: false
 
       - name: Set weekly fuzz seed

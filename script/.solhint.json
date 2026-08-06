@@ -2,6 +2,8 @@
   "extends": "solhint:recommended",
   "rules": {
     "func-name-mixedcase": "off",
+    "gas-custom-errors": "off",
+    "gas-small-strings": "off",
     "import-path-check": "off",
     "no-empty-blocks": "off",
     "reason-string": "off",

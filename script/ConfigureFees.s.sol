@@ -10,9 +10,26 @@ import {CofferMarketplace} from "../src/CofferMarketplace.sol";
 /// @dev Only buySignedListing (ETH) and acceptSignedOffer (WETH) charge a fee. Signing and cancelling are free.
 contract ConfigureFees is Script {
     /// @notice Apply default fee tiers to the marketplace
-    function run() external {
-        address marketplaceAddr = vm.envAddress("HOODI_COFFER_MARKETPLACE_ADDRESS");
+    /// @dev The target address is a deliberate command-line argument (never read from the
+    ///      environment) so a stale shell env can never select the instance being configured.
+    ///      Take it from the deploy output or the `broadcast/` record and invoke with:
+    ///      `set -a && source ../.env && set +a` (exports the env vars read below; plain `source`
+    ///      keeps them shell-local and forge never sees them), then
+    ///      `forge script script/ConfigureFees.s.sol --sig "run(address)" <MARKETPLACE_ADDRESS>
+    ///      --broadcast --rpc-url $HOODI_RPC_URL`.
+    ///      Pre-flight guards revert loudly on a wrong target (typo, wrong chain, non-marketplace
+    ///      address) instead of silently configuring it.
+    /// @param marketplaceAddr The CofferMarketplace instance to configure
+    function run(address marketplaceAddr) external {
         CofferMarketplace marketplace = CofferMarketplace(payable(marketplaceAddr));
+
+        address expectedOwner = vm.envAddress("HOODI_MARKETPLACE_OWNER");
+        require(expectedOwner != address(0), "ConfigureFees: HOODI_MARKETPLACE_OWNER is zero");
+        address bondNft = vm.envAddress("HOODI_COFFER_BOND_NFT_ADDRESS");
+
+        require(marketplaceAddr.code.length > 0, "ConfigureFees: no code at target address");
+        require(marketplace.owner() == expectedOwner, "ConfigureFees: unexpected owner (stale target?)");
+        require(marketplace.I_COFFER_BOND_NFT() == bondNft, "ConfigureFees: bond NFT mismatch (stale target?)");
 
         vm.startBroadcast();
 

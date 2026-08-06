@@ -6,16 +6,27 @@ import {CofferMarketplace} from "../src/CofferMarketplace.sol";
 
 /// @title DeployCofferMarketplace
 /// @author Coffer
-/// @notice Deploys CofferMarketplace and updates root .env with the deployed address
+/// @notice Deploys CofferMarketplace and prints the address line to record in the workspace .env
+/// @dev Runbook: `set -a && source ../.env && set +a` first (plain `source` sets shell-local
+///      variables that the forge child process never sees; `set -a` auto-exports them), then
+///      `forge script script/DeployCofferMarketplace.s.sol --broadcast --rpc-url $HOODI_RPC_URL`.
+///      After a successful broadcast, manually copy the printed
+///      `HOODI_COFFER_MARKETPLACE_ADDRESS=...` line into `../.env` for downstream consumers
+///      (backend/frontend/smart-contracts repo). ConfigureFees does not read it: pass the
+///      address explicitly via `--sig "run(address)" <address>`. The address is also recorded
+///      in `broadcast/`.
+///      Requires HOODI_MARKETPLACE_OWNER and HOODI_MARKETPLACE_FEE_RECIPIENT to be set and
+///      non-zero; the script reverts otherwise (no fallback keys). For mainnet, introduce a
+///      MAINNET_* key set and adjust names accordingly.
 contract DeployCofferMarketplace is Script {
-    string private constant ENV_FILE_PATH = "../.env";
-
-    /// @notice Deploy the marketplace contract using environment variables from root .env
+    /// @notice Deploy the marketplace contract using environment variables from the workspace .env
     function run() external {
         address weth = vm.envAddress("HOODI_WETH_ADDRESS");
         address bondNft = vm.envAddress("HOODI_COFFER_BOND_NFT_ADDRESS");
-        address marketplaceOwner = vm.envAddress("MARKETPLACE_OWNER");
-        address feeRecipient = vm.envAddress("FEE_RECIPIENT");
+        address marketplaceOwner = vm.envAddress("HOODI_MARKETPLACE_OWNER");
+        address feeRecipient = vm.envAddress("HOODI_MARKETPLACE_FEE_RECIPIENT");
+        require(marketplaceOwner != address(0), "Deploy: HOODI_MARKETPLACE_OWNER is zero");
+        require(feeRecipient != address(0), "Deploy: HOODI_MARKETPLACE_FEE_RECIPIENT is zero");
 
         vm.startBroadcast();
 
@@ -26,40 +37,7 @@ contract DeployCofferMarketplace is Script {
         address marketplaceAddress = address(marketplace);
         console.log("CofferMarketplace:", marketplaceAddress);
 
-        console.log("\nUpdating .env file...");
-        updateEnvVariable("HOODI_COFFER_MARKETPLACE_ADDRESS", addressToString(marketplaceAddress));
-    }
-
-    /// @notice Update an environment variable in the root .env file using sed
-    /// @param key The environment variable name
-    /// @param value The new value to set
-    function updateEnvVariable(string memory key, string memory value) internal {
-        string[] memory inputs = new string[](4);
-        inputs[0] = "sed";
-        inputs[1] = "-i";
-        inputs[2] = string(abi.encodePacked("s/^", key, "=.*$/", key, "=", value, "/"));
-        inputs[3] = ENV_FILE_PATH;
-
-        // forge-lint: disable-next-line(unsafe-cheatcode)
-        vm.ffi(inputs);
-    }
-
-    /// @notice Convert address to string with 0x prefix
-    /// @param addr The address to convert
-    /// @return The address as a string
-    function addressToString(address addr) internal pure returns (string memory) {
-        bytes memory alphabet = "0123456789abcdef";
-        bytes memory data = abi.encodePacked(addr);
-        bytes memory str = new bytes(2 + data.length * 2);
-
-        str[0] = "0";
-        str[1] = "x";
-
-        for (uint256 i = 0; i < data.length; ++i) {
-            str[2 + i * 2] = alphabet[uint8(data[i] >> 4)];
-            str[3 + i * 2] = alphabet[uint8(data[i] & 0x0f)];
-        }
-
-        return string(str);
+        console.log("\nManual step - add/update this line in ../.env:");
+        console.log(string.concat("HOODI_COFFER_MARKETPLACE_ADDRESS=", vm.toString(marketplaceAddress)));
     }
 }

@@ -67,17 +67,27 @@ contract MockCoffer {
     uint128 public maturityValue = 1 ether;
     uint32 public duration = 86400;
     uint32 public startTs;
+    bool public consensusWithdrawClosed;
+    uint128 public totalConsensusReserved;
 
     constructor() {
         startTs = uint32(block.timestamp - 86401);
     }
 
     function sHolderConditions(uint256) external view returns (uint128, uint32, uint32, bool) {
-        return (maturityValue, duration, startTs, false);
+        return (maturityValue, duration, startTs, consensusWithdrawClosed);
     }
 
     function setMaturityValue(uint128 _val) external {
         maturityValue = _val;
+    }
+
+    function setConsensusWithdrawClosed(bool _closed) external {
+        consensusWithdrawClosed = _closed;
+    }
+
+    function setTotalConsensusReserved(uint128 _reserved) external {
+        totalConsensusReserved = _reserved;
     }
 }
 
@@ -342,13 +352,13 @@ contract CofferMarketplaceTest is Test {
         assertEq(marketplace.sFeeRecipient(), feeRecipient);
     }
 
-    function test_constructor_revert_zeroWeth() public {
-        vm.expectRevert(CofferMarketplace.ZeroAddress.selector);
+    function test_constructor_revert_wethWithoutCode() public {
+        vm.expectRevert(CofferMarketplace.NotAContract.selector);
         new CofferMarketplace(address(0), address(bondNft), mpOwner, feeRecipient);
     }
 
-    function test_constructor_revert_zeroBondNft() public {
-        vm.expectRevert(CofferMarketplace.ZeroAddress.selector);
+    function test_constructor_revert_bondNftWithoutCode() public {
+        vm.expectRevert(CofferMarketplace.NotAContract.selector);
         new CofferMarketplace(address(weth), address(0), mpOwner, feeRecipient);
     }
 
@@ -850,5 +860,53 @@ contract CofferMarketplaceTest is Test {
         assertEq(dur, 86400);
         assertEq(cofferAddr, address(coffer));
         assertGt(st, 0);
+    }
+
+    // ───── Fill events carry the consumed nonces ─────
+
+    // The fill events name the exact signed order: the consumed per-bond nonce and the global
+    // nonce the order was signed at. The indexer attributes fills to stored orders by these
+    // values, so they must be the consumed ones — not the post-bump ones, and not always zero.
+    // Both nonces are advanced before the fill so a zero-defaulted emit cannot pass.
+
+    function test_listingPurchasedEmitsConsumedNonces() public {
+        uint128 price = 1 ether;
+        uint64 exp = uint64(block.timestamp + 1 days);
+
+        vm.startPrank(seller);
+        marketplace.cancelListing(bondId); // per-bond nonce 0 -> 1
+        marketplace.cancelAllListings(); // global nonce 0 -> 1
+        vm.stopPrank();
+
+        bytes memory sig = _signListingNow(seller, SELLER_PK, price, exp);
+
+        vm.expectEmit(true, true, true, true, address(marketplace));
+        emit CofferMarketplace.ListingPurchased(bondId, buyer, seller, price, 0, 1, 1);
+
+        vm.prank(buyer);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, 1 ether, exp, 1, 1, 0, sig);
+
+        // The event carried the consumed value; the counter has already moved past it.
+        assertEq(marketplace.sListingNonce(seller, bondId), 2);
+    }
+
+    function test_offerAcceptedEmitsConsumedNonces() public {
+        uint128 amount = 1 ether;
+        uint64 exp = uint64(block.timestamp + 1 days);
+
+        vm.startPrank(buyer);
+        marketplace.cancelOffer(bondId); // per-bond nonce 0 -> 1
+        marketplace.cancelAllOffers(); // global nonce 0 -> 1
+        vm.stopPrank();
+
+        bytes memory sig = _signOfferNow(buyer, BUYER_PK, amount, exp);
+
+        vm.expectEmit(true, true, true, true, address(marketplace));
+        emit CofferMarketplace.OfferAccepted(bondId, buyer, seller, amount, 0, 1, 1);
+
+        vm.prank(seller);
+        marketplace.acceptSignedOffer(bondId, buyer, amount, 1 ether, exp, type(uint256).max, 1, 1, sig);
+
+        assertEq(marketplace.sOfferNonce(buyer, bondId), 2);
     }
 }

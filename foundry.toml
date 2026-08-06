@@ -3,10 +3,15 @@ src = "src"
 out = "out"
 libs = ["lib"]
 solc = "0.8.34"
+# Pinned so bytecode semantics do not follow whatever forge release is installed.
+evm_version = "osaka"
+optimizer = false
 remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
-no_match_coverage = "^test/|^script/|^integration/"
-no_match_path =  "test/{invariant,integration}/*" #comment this line if wan to test invariants with -> forge test --mp "test/invariant/*"
-#ffi = true
+no_match_coverage = "^test/|^script/|^integration/|^audit-poc/"
+# Disposable audit PoC tree, excluded from compilation. Comment this line out to build and run it
+# with -> forge test --mp "test/audit-poc/*" --no-match-path "zzz-nomatch"
+skip = ["test/audit-poc/**"]
+no_match_path =  "test/{invariant,integration,audit-poc}/*" #comment this line if wan to test invariants with -> forge test --mp "test/invariant/*"
 
 [fuzz]
 runs = 1024
@@ -32,9 +37,13 @@ runs = 512
 depth = 64
 fail_on_revert = true
 
-# CI profile skips invariant tests (slow)
+# CI profile: inherits the default exclusions (invariant/integration/audit-poc). Do not set
+# no_match_path here — a profile value REPLACES the default's, it does not merge, and a narrower
+# glob would re-admit the audit-poc tree into CI test runs.
 [profile.ci]
-no_match_path = "test/invariant/*"
 
 [lint]
 exclude_lints = ["mixed-case-function"]
+# Disposable audit PoC tree, excluded from linting. The glob needs the file component: a trailing
+# "**" matches no files and a "./" prefix matches nothing at all.
+ignore = ["test/audit-poc/**/*.sol"]
