@@ -63,8 +63,8 @@ contract MockBondNft {
 contract MockCoffer {
     mapping(uint256 => uint128) public maturityValues;
 
-    function sHolderConditions(uint256 bondId) external view returns (uint128, uint32, uint32, bool) {
-        return (maturityValues[bondId], 86400, uint32(block.timestamp - 86401), false);
+    function sHolderConditions(uint256 bondId) external view returns (uint128, uint32, uint32) {
+        return (maturityValues[bondId], 86400, uint32(block.timestamp - 86401));
     }
 
     function setMaturityValue(uint256 bondId, uint128 val) external {

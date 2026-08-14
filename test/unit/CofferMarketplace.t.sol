@@ -67,27 +67,17 @@ contract MockCoffer {
     uint128 public maturityValue = 1 ether;
     uint32 public duration = 86400;
     uint32 public startTs;
-    bool public consensusWithdrawClosed;
-    uint128 public totalConsensusReserved;
 
     constructor() {
         startTs = uint32(block.timestamp - 86401);
     }
 
-    function sHolderConditions(uint256) external view returns (uint128, uint32, uint32, bool) {
-        return (maturityValue, duration, startTs, consensusWithdrawClosed);
+    function sHolderConditions(uint256) external view returns (uint128, uint32, uint32) {
+        return (maturityValue, duration, startTs);
     }
 
     function setMaturityValue(uint128 _val) external {
         maturityValue = _val;
-    }
-
-    function setConsensusWithdrawClosed(bool _closed) external {
-        consensusWithdrawClosed = _closed;
-    }
-
-    function setTotalConsensusReserved(uint128 _reserved) external {
-        totalConsensusReserved = _reserved;
     }
 }
 

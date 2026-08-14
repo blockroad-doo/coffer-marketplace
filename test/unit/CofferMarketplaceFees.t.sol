@@ -67,8 +67,8 @@ contract MockCoffer {
         startTs = uint32(block.timestamp - 86401);
     }
 
-    function sHolderConditions(uint256) external view returns (uint128, uint32, uint32, bool) {
-        return (maturityValue, duration, startTs, false);
+    function sHolderConditions(uint256) external view returns (uint128, uint32, uint32) {
+        return (maturityValue, duration, startTs);
     }
 
     function setMaturityValue(uint128 _val) external {

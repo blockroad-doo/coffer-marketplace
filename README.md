@@ -16,7 +16,7 @@ A Coffer Bond NFT is an ERC-721 token representing a fixed-income bond from a va
 - **Duration.** The bond term in seconds.
 - **Start timestamp.** When the bond was created.
 
-A bond is considered **outstanding** while its `bondMaturityValue != 0`. The marketplace only allows trading outstanding bonds. Bonds may mature, be partially withdrawn, or be early-redeemed by the validator. Any of these can zero out the maturity value and invalidate the bond for trading.
+A bond is considered **outstanding** while its `bondMaturityValue != 0`. The marketplace only allows trading outstanding bonds. Bonds may mature, be partially withdrawn, be early-redeemed by the validator, or accelerate to claimable when their Coffer defaults. Any of these can zero out the maturity value and invalidate the bond for trading.
 
 ---
 
@@ -50,7 +50,7 @@ A bond is considered **outstanding** while its `bondMaturityValue != 0`. The mar
 | Interface | Purpose |
 |---|---|
 | `ICofferBondNft` | The marketplace uses `ownerOf`, `cofferOf`, `isApprovedForAll`, and `safeTransferFrom` |
-| `ICoffer` | Query bond conditions via `sHolderConditions`, which gives maturity value, duration, start timestamp, and whether the bond's consensus withdrawal has been closed, plus `totalConsensusReserved` for the value the Coffer holds back for closed bonds. Trades are gated on maturity value alone, the rest is exposed through `getBondCollateral` for pricing |
+| `ICoffer` | Query bond conditions via `sHolderConditions`, which gives maturity value, duration, and start timestamp. Trades are gated on maturity value alone. Pricing reads the Coffer directly through the address that `getBondData` returns |
 | `IWETH` | ERC-20 operations for Wrapped ETH, namely `balanceOf`, `allowance`, `transfer`, `transferFrom`, and `deposit` |
 
 ---
@@ -140,34 +140,36 @@ The signed `maturityValue` must equal the bond's live maturity (`getBondData(bon
 
 The maturity value binds the **size** of a claim, not its **quality**. A fill checks that the signed
 maturity value equals the live one and nothing else about the backing, so two bonds carrying the same
-maturity value can settle very differently. `getBondCollateral(bondId)` returns the Coffer state that
-decides which one you are buying, in a single call.
+maturity value can settle very differently. The Coffer state that decides which one you are buying is
+read on the Coffer itself, through the `cofferAddress` that `getBondData(bondId)` returns.
 
-- **`cofferBalance`** is what the Coffer can pay out right now. A Coffer whose validator is still
-  staked holds only a fraction of what its outstanding bonds are worth, and the rest arrives from the
-  consensus layer later.
-- **`totalConsensusReserved`** is the value the Coffer holds back for bonds whose consensus withdrawal
-  has already been closed. It is **senior**. A bond whose own `consensusWithdrawClosed` is false can
-  only draw against `cofferBalance - totalConsensusReserved`, so a well funded Coffer can still leave
-  an open bond short.
-- **`consensusWithdrawClosed`** says whether this bond is one of the senior ones. A closed bond draws
-  against the whole balance. Closing is what starts the consensus withdrawal, so a closed bond is
-  typically waiting on funds in transit, days for a partial withdrawal and longer for a full validator
-  exit, while holding a senior claim once they arrive.
+Two facts drive the price:
+
+- **The Coffer balance** is what a claim can draw on right now. A Coffer whose validator is still
+  staked holds only a fraction of what its outstanding bonds are worth. The validator tops the balance
+  up before each maturity, and consensus-layer payouts arrive with no event and no log, so watch the
+  balance itself rather than waiting for events.
+- **`validatorDefaulted`** is the one decisive flag. It is set when a matured bond could not be paid,
+  and it never unsets. In a defaulted Coffer every bond is claimable at its full maturity value
+  immediately, first come first served, and anyone can repeatedly call `exitValidator()` on the Coffer
+  to sweep the validator's entire remaining stake into the balance. A distressed bond is therefore a
+  buy-and-act position: its worth is driven by the balance, the swept stake still in transit, and how
+  fast the new owner claims.
+
+Read `validatorDefaulted` from `sValidatorConditions()` **by field name**, using the full Coffer ABI.
+Never read a struct value by its tuple position. A position can change its meaning across contract
+versions without any error, and a read by name fails loudly instead of returning a wrong answer.
 
 Three consequences worth pricing in:
 
-- Settlement after funds arrive is first come first served among closed bonds, and a closed bond can
-  draw against value another closed bond reserved. If less arrives than the total reserved, the
-  earlier claimant is paid in full and a later one is paid partially.
+- Claims in a defaulted Coffer are first come first served. If the balance and the incoming stake
+  cover less than the total owed, the earliest claimants are paid in full and the last are not.
 - A partial claim does not fail. It lowers the bond's maturity value by the amount paid and leaves the
-  bond live for the remainder, which also invalidates any order signed against the old value.
-- The consensus withdrawal can be triggered only once per bond, ever. A buyer inherits that, so a bond
-  whose withdrawal was already closed cannot be re-triggered by its new owner.
-
-The marketplace does not surface validator-level conditions such as `exitAllowed`, `issueSize` or
-`outstandingBonds`. Read `sValidatorConditions()` directly on the `cofferAddress` the view returns if
-you need them.
+  bond live for the remainder, which also invalidates any order signed against the old value. In a
+  defaulted Coffer this is routine rather than rare, so re-quote all of a Coffer's bonds when
+  `ValidatorDefaulted` fires and keep expirations short on distressed listings.
+- Maturity dates stop mattering after a default. An immature bond in a defaulted Coffer claims exactly
+  like a matured one.
 
 ### Selling via Listing
 
@@ -241,9 +243,9 @@ Two limits are worth stating plainly. Screening catches a maker that misbehaves 
 - **Pre-signed nonce queues.** Orders signed ahead of the current on-chain nonce arm one by one as fills and cancels advance it. The recovery procedure under Integration Considerations clears the whole queue in one transaction.
 - **Stale signatures.** A signed order stays fillable until it expires or the maker cancels on-chain, and re-signing off-chain does not revoke it. Short expirations bound how long a stale signature can linger.
 - **Admin fee changes.** The owner can change fee basis points at any time. A fill never pays above the buyer-signed `maxFee` on accept or the `_maxFee` parameter on buy, so a fee raise can make fills revert but can never charge more than the taker agreed to.
-- **Bond invalidation after signing.** A bond's maturity value can change after an order is signed, through a partial withdrawal, maturity, or early redemption. Fills against the old value revert `MaturityValueMismatch`, or `BondNotOutstanding` once the value is zeroed, and the order book must re-quote and re-sign against the live value.
+- **Bond invalidation after signing.** A bond's maturity value can change after an order is signed, through a partial withdrawal, maturity, early redemption, or a claim in a defaulted Coffer. Fills against the old value revert `MaturityValueMismatch`, or `BondNotOutstanding` once the value is zeroed, and the order book must re-quote and re-sign against the live value.
 - **Maker-controlled code in a fill.** A contract wallet's signature check and a contract offerer's receiver hook both run with the taker's gas. An order can be written so that every fill attempt burns that gas and then fails, leaving the order live. No funds move and no fill settles on terms the taker did not agree to. See Screening orders and sizing fills.
-- **Settlement timing and seniority.** Equal maturity values do not mean equal assets. A bond may be waiting on funds in transit from the consensus layer, and a bond whose consensus withdrawal is still open ranks behind the Coffer's reserve for those that are closed. Read `getBondCollateral` before quoting, see Assessing a bond before quoting a price.
+- **Default and impairment.** Equal maturity values do not mean equal assets. A defaulted Coffer pays first come first served from whatever balance and swept stake it has, so late claimants can be paid partially or not at all. Check `validatorDefaulted` and the Coffer balance before quoting, see Assessing a bond before quoting a price.
 
 ### Admin Operations
 
@@ -260,7 +262,6 @@ marketplace.acceptOwnership()             // step 2 of Ownable2Step
 ### View Functions
 
 - `getBondData(bondId)` returns the maturity value, duration, start timestamp, and coffer address.
-- `getBondCollateral(bondId)` returns the maturity value, whether the bond's consensus withdrawal is closed, the coffer address, the coffer's ETH balance, and the coffer's reserve for closed bonds. See Assessing a bond before quoting a price.
 - `sGlobalListingNonce(address)` is the global listing nonce for a seller, bumped by cancelAllListings.
 - `sListingNonce(address, bondId)` is the per-bond listing nonce for a seller.
 - `sGlobalOfferNonce(address)` is the global offer nonce for a buyer, bumped by cancelAllOffers.

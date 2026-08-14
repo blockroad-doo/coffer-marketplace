@@ -70,8 +70,8 @@ contract MockCofferForHandler {
         startTs = uint32(block.timestamp);
     }
 
-    function sHolderConditions(uint256 bondId) external view returns (uint128, uint32, uint32, bool) {
-        return (maturityValues[bondId], DURATION, startTs, false);
+    function sHolderConditions(uint256 bondId) external view returns (uint128, uint32, uint32) {
+        return (maturityValues[bondId], DURATION, startTs);
     }
 
     function setMaturityValue(uint256 bondId, uint128 val) external {

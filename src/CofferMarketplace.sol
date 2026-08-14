@@ -493,36 +493,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         returns (uint128 maturityValue, uint32 duration, uint32 startTimestamp, address cofferAddress)
     {
         cofferAddress = ICofferBondNft(I_COFFER_BOND_NFT).cofferOf(_bondId);
-        // slither-disable-next-line unused-return
-        (maturityValue, duration, startTimestamp,) = ICoffer(cofferAddress).sHolderConditions(_bondId);
-    }
-
-    /// @notice Get a bond's claim size alongside the Coffer state that determines whether and when that
-    ///         claim can be paid. A trade is gated on maturity value alone, which is a claim size and not
-    ///         a statement about the backing, so quoting a price needs the rest of this data.
-    /// @param _bondId The bond token ID
-    /// @return maturityValue The bond maturity value, the size of the claim
-    /// @return consensusWithdrawClosed Whether this bond's consensus withdrawal has been closed. A closed bond
-    ///         claims against the Coffer's whole balance, an open one must leave totalConsensusReserved behind
-    /// @return cofferAddress The Coffer address, for reading validator-level conditions directly
-    /// @return cofferBalance The Coffer's ETH balance, what is available to claim against right now
-    /// @return totalConsensusReserved The Coffer's reserve for closed bonds, senior to every open bond
-    function getBondCollateral(uint256 _bondId)
-        external
-        view
-        returns (
-            uint128 maturityValue,
-            bool consensusWithdrawClosed,
-            address cofferAddress,
-            uint256 cofferBalance,
-            uint128 totalConsensusReserved
-        )
-    {
-        cofferAddress = ICofferBondNft(I_COFFER_BOND_NFT).cofferOf(_bondId);
-        // slither-disable-next-line unused-return
-        (maturityValue,,, consensusWithdrawClosed) = ICoffer(cofferAddress).sHolderConditions(_bondId);
-        cofferBalance = cofferAddress.balance;
-        totalConsensusReserved = ICoffer(cofferAddress).totalConsensusReserved();
+        (maturityValue, duration, startTimestamp) = ICoffer(cofferAddress).sHolderConditions(_bondId);
     }
 
     // ───── Internal: Fee Math ─────
@@ -547,7 +518,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         // slither-disable-next-line calls-loop
         address cofferAddr = ICofferBondNft(I_COFFER_BOND_NFT).cofferOf(_bondId);
         // slither-disable-next-line unused-return,calls-loop
-        (maturityValue,,,) = ICoffer(cofferAddr).sHolderConditions(_bondId);
+        (maturityValue,,) = ICoffer(cofferAddr).sHolderConditions(_bondId);
     }
 
     // ───── Internal: Trade Execution ─────

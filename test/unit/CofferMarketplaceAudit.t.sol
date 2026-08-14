@@ -68,13 +68,12 @@ contract MockCoffer {
     mapping(uint256 => uint32) public customStartTs;
     mapping(uint256 => uint32) public customDuration;
 
-    function sHolderConditions(uint256 bondId) external view returns (uint128, uint32, uint32, bool) {
+    function sHolderConditions(uint256 bondId) external view returns (uint128, uint32, uint32) {
         require(!shouldReversions[bondId], "COFFER_REVERT");
         return (
             maturityValues[bondId],
             customDuration[bondId] == 0 ? 86400 : customDuration[bondId],
-            customStartTs[bondId] == 0 ? uint32(block.timestamp - 86401) : customStartTs[bondId],
-            false
+            customStartTs[bondId] == 0 ? uint32(block.timestamp - 86401) : customStartTs[bondId]
         );
     }
 
