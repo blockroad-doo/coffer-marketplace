@@ -15,7 +15,3 @@ docs/
 
 # Dotenv file
 .env
-
-#audit 
-test/audit-poc
-audit

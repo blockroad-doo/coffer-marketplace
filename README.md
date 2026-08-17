@@ -138,38 +138,20 @@ The signed `maturityValue` must equal the bond's live maturity (`getBondData(bon
 
 ### Assessing a bond before quoting a price
 
-The maturity value binds the **size** of a claim, not its **quality**. A fill checks that the signed
-maturity value equals the live one and nothing else about the backing, so two bonds carrying the same
-maturity value can settle very differently. The Coffer state that decides which one you are buying is
-read on the Coffer itself, through the `cofferAddress` that `getBondData(bondId)` returns.
+The maturity value binds the **size** of a claim, not its **quality**. A fill checks that the signed maturity value equals the live one and nothing else about the backing, so two bonds carrying the same maturity value can settle very differently. The Coffer state that decides which one you are buying is read on the Coffer itself, through the `cofferAddress` that `getBondData(bondId)` returns.
 
 Two facts drive the price:
 
-- **The Coffer balance** is what a claim can draw on right now. A Coffer whose validator is still
-  staked holds only a fraction of what its outstanding bonds are worth. The validator tops the balance
-  up before each maturity, and consensus-layer payouts arrive with no event and no log, so watch the
-  balance itself rather than waiting for events.
-- **`validatorDefaulted`** is the one decisive flag. It is set when a matured bond could not be paid,
-  and it never unsets. In a defaulted Coffer every bond is claimable at its full maturity value
-  immediately, first come first served, and anyone can repeatedly call `exitValidator()` on the Coffer
-  to sweep the validator's entire remaining stake into the balance. A distressed bond is therefore a
-  buy-and-act position: its worth is driven by the balance, the swept stake still in transit, and how
-  fast the new owner claims.
+- **The Coffer balance** is what a claim can draw on right now. A Coffer whose validator is still staked holds only a fraction of what its outstanding bonds are worth. The validator tops the balance up before each maturity, and consensus-layer payouts arrive with no event and no log, so watch the balance itself rather than waiting for events.
+- **`validatorDefaulted`** is the one decisive flag. It is set when a matured bond could not be paid, either by anyone calling `declareDefault` or atomically by the holder's `redeemBondOrDefault`, and it clears only when the validator calls `clearDefault()` after every bond has been settled at its full maturity value, at which point bond sales and new bonds can resume. In a defaulted Coffer every bond is claimable at its full maturity value immediately, first come first served, and anyone can repeatedly call `exitValidator()` on the Coffer while any bond is outstanding to sweep the validator's entire remaining stake into the balance. A distressed bond is therefore a buy-and-act position: its worth is driven by the balance, the swept stake still in transit, and how fast the new owner claims.
 
-Read `validatorDefaulted` from `sValidatorConditions()` **by field name**, using the full Coffer ABI.
-Never read a struct value by its tuple position. A position can change its meaning across contract
-versions without any error, and a read by name fails loudly instead of returning a wrong answer.
+Read `validatorDefaulted` from `sValidatorConditions()` **by field name**, using the full Coffer ABI. Never read a struct value by its tuple position. A position can change its meaning across contract versions without any error, and a read by name fails loudly instead of returning a wrong answer.
 
 Three consequences worth pricing in:
 
-- Claims in a defaulted Coffer are first come first served. If the balance and the incoming stake
-  cover less than the total owed, the earliest claimants are paid in full and the last are not.
-- A partial claim does not fail. It lowers the bond's maturity value by the amount paid and leaves the
-  bond live for the remainder, which also invalidates any order signed against the old value. In a
-  defaulted Coffer this is routine rather than rare, so re-quote all of a Coffer's bonds when
-  `ValidatorDefaulted` fires and keep expirations short on distressed listings.
-- Maturity dates stop mattering after a default. An immature bond in a defaulted Coffer claims exactly
-  like a matured one.
+- Claims in a defaulted Coffer are first come first served. If the balance and the incoming stake cover less than the total owed, the earliest claimants are paid in full and the last are not.
+- A partial claim does not fail. It lowers the bond's maturity value by the amount paid and leaves the bond live for the remainder, which also invalidates any order signed against the old value. In a defaulted Coffer this is routine rather than rare, so re-quote all of a Coffer's bonds when `ValidatorDefaulted` fires and keep expirations short on distressed listings.
+- Maturity dates stop mattering after a default. An immature bond in a defaulted Coffer claims exactly like a matured one.
 
 ### Selling via Listing
 
@@ -245,7 +227,7 @@ Two limits are worth stating plainly. Screening catches a maker that misbehaves 
 - **Admin fee changes.** The owner can change fee basis points at any time. A fill never pays above the buyer-signed `maxFee` on accept or the `_maxFee` parameter on buy, so a fee raise can make fills revert but can never charge more than the taker agreed to.
 - **Bond invalidation after signing.** A bond's maturity value can change after an order is signed, through a partial withdrawal, maturity, early redemption, or a claim in a defaulted Coffer. Fills against the old value revert `MaturityValueMismatch`, or `BondNotOutstanding` once the value is zeroed, and the order book must re-quote and re-sign against the live value.
 - **Maker-controlled code in a fill.** A contract wallet's signature check and a contract offerer's receiver hook both run with the taker's gas. An order can be written so that every fill attempt burns that gas and then fails, leaving the order live. No funds move and no fill settles on terms the taker did not agree to. See Screening orders and sizing fills.
-- **Default and impairment.** Equal maturity values do not mean equal assets. A defaulted Coffer pays first come first served from whatever balance and swept stake it has, so late claimants can be paid partially or not at all. Check `validatorDefaulted` and the Coffer balance before quoting, see Assessing a bond before quoting a price.
+- **Default and impairment.** Equal maturity values do not mean equal assets. A default lands when a matured bond cannot be paid, either through `declareDefault` or atomically through the holder's `redeemBondOrDefault`, and while it stands a defaulted Coffer pays first come first served from whatever balance and swept stake it has, so late claimants can be paid partially or not at all. After every bond is settled at full value the validator can clear the default with `clearDefault()` and resume operations. Check `validatorDefaulted` and the Coffer balance before quoting, see Assessing a bond before quoting a price.
 
 ### Admin Operations
 
