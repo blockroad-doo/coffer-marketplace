@@ -629,12 +629,12 @@ contract CofferMarketplaceAuditTest is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // PoC-2: Validator early-redeem griefs trade
+    // PoC-2: Validator redeem griefs trade
     // Anyone who can zero the bond maturity makes a fill revert BondNotOutstanding.
     // Verdict: PASS (grief confirmed, no fund loss)
     // ═══════════════════════════════════════════════════════════════
 
-    function test_poc2_validatorEarlyRedeemGriefsTrade() public {
+    function test_poc2_validatorRedeemGriefsTrade() public {
         uint128 price = 0.9 ether;
         coffer.setMaturityValue(bondId, 1 ether);
 
