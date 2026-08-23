@@ -68,7 +68,7 @@ The ETH payout forwards at most `SELLER_PAYOUT_GAS_LIMIT` (100,000) gas to the s
 ### Offers (WETH)
 
 1. Buyer signs an EIP-712 `Offer(bondId, wethAmount, maturityValue, expiration, maxFee, nonce, globalNonce)` message at the current on-chain per-bond nonce. The accept reverts if the WETH fee computed at accept time exceeds the signed `maxFee`. Signing costs nothing.
-2. The signed offer is posted to the off-chain order book. There is no on-chain registration step and no WETH balance or allowance check until acceptance.
+2. The signed offer is posted to the off-chain order book. There is no on-chain registration step, and the contract does not check the WETH balance or allowance until acceptance. The Coffer order book checks both once at intake and refuses an offer its maker cannot fund.
 3. Seller calls `acceptSignedOffer()` passing the offer parameters and the buyer's signature. The contract rejects self-trades and a zero amount, checks the signed per-bond and global nonces against the current ones, requires the caller to own the bond and have the marketplace approved, checks the offer is unexpired, verifies the signature against the buyer, checks the bond is outstanding and that the signed `maturityValue` equals the bond's live maturity value (reverting `MaturityValueMismatch` otherwise), recomputes the WETH fee from the current admin config (reverting if it exceeds the signed `maxFee`), bumps the nonce to prevent replay, then verifies the buyer has sufficient WETH balance and allowance and executes the trade. The WETH amount goes from buyer to seller, the WETH fee goes from buyer to the marketplace, and the NFT transfers from seller to buyer.
 
 ### Fee Flow
@@ -205,7 +205,7 @@ A fill runs code the maker controls, at three points. The ERC-1271 `isValidSigna
 
 The two unbounded points mean an order can be written so that every attempt to fill it consumes the taker's whole gas limit and then fails, leaving the order live for the next taker. What such an order cannot do is settle on terms the taker did not agree to. Signature verification precedes every transfer, the digest binds every field of the order, and every failure path reverts the entire fill including the nonce bump. The exposure is gas, and its ceiling is the limit the taker submitted.
 
-The two sides are not symmetric. A listing's maker owns the bond and has approved the marketplace, both checked before their code runs. An offer's maker is checked for nothing beforehand, and their WETH balance and allowance are not read until the transfers, so an offerer holding no WETH and granting no allowance still runs code inside a seller's accept. Posting an offer costs nothing and keeping it alive costs nothing.
+The two sides are not symmetric. A listing's maker owns the bond and has approved the marketplace, both checked before their code runs. An offer's maker is checked for nothing beforehand by the contract, and their WETH balance and allowance are not read until the transfers, so an offerer holding no WETH and granting no allowance still runs code inside a seller's accept. The Coffer order book reads both once at intake and refuses an unfunded offer, which narrows this to funds that move after posting. Posting an offer costs nothing and keeping it alive costs nothing.
 
 The order book carries this, not the contract.
 
