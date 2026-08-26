@@ -8,34 +8,39 @@ evm_version = "osaka"
 optimizer = false
 remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
 no_match_coverage = "^test/|^script/|^integration/|^audit-poc/"
-# Disposable audit PoC tree, excluded from compilation. Comment this line out to build and run it
-# with -> forge test --mp "test/audit-poc/*" --no-match-path "zzz-nomatch"
-skip = ["test/audit-poc/**"]
-no_match_path =  "test/{invariant,integration,audit-poc}/*" #comment this line if wan to test invariants with -> forge test --mp "test/invariant/*"
+
+# Keeps plain `forge test` (and the ci profile) on the unit suite. This filter applies even under
+# --match-path, so `forge test --mp "test/invariant/*"` selects zero tests here; run the invariant
+# suite through its profile:  FOUNDRY_PROFILE=invariants forge test
+no_match_path = "test/{invariant,integration}/*"
 
 [fuzz]
 runs = 1024
 
 # ── Invariant Fuzz Testing ──────────────────────────────────────────────
-# Run all tests (unit + invariant):      forge test
-# Run ONLY invariant tests:              forge test --match-path "test/invariant/*"
-# Run ONLY unit tests (skip invariant):  forge test --match-path "test/unit/*"
-# Run strict invariant mode:             FOUNDRY_PROFILE=strict forge test --match-path "test/invariant/*"
-# Coverage (already excludes test/):     forge coverage --report summary
+# Unit tests only (default):    forge test
+# Invariant suite only:         FOUNDRY_PROFILE=invariants forge test -vv
+# Shorter / longer campaigns:   FOUNDRY_INVARIANT_RUNS=64 FOUNDRY_INVARIANT_DEPTH=200 ...
+# Coverage (excludes test/):    forge coverage --report summary
 #
-# To disable invariant tests entirely, comment out [invariant] and
-# [profile.strict.invariant] sections below.
+# [invariant] is a standalone section, so it applies to every profile. runs/depth stay explicit
+# because an unset key falls back to [fuzz] (runs would become 1024). fail_on_revert must stay
+# true: the handler uses vm.expectRevert as an exact revert oracle and assertEq for per-fill
+# postconditions, and both surface as handler reverts that a permissive run silently swallows.
 # ────────────────────────────────────────────────────────────────────────
 
 [invariant]
 runs = 512
 depth = 64
-fail_on_revert = false
-
-[profile.strict.invariant]
-runs = 512
-depth = 64
 fail_on_revert = true
+
+# Invariant suite profile. A named profile inherits solc, evm_version, skip and [invariant] from
+# default; no_match_path is restated because a profile value REPLACES the default's (it does not
+# merge), and dropping "invariant" from the glob is what admits the suite. A future per-profile
+# override table would be [profile.invariants.invariant] (profile "invariants", section "invariant").
+[profile.invariants]
+match_path = "test/invariant/*"
+no_match_path = "test/{integration,audit-poc}/*"
 
 # CI profile: inherits the default exclusions (invariant/integration/audit-poc). Do not set
 # no_match_path here — a profile value REPLACES the default's, it does not merge, and a narrower

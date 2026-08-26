@@ -11,8 +11,16 @@ import {
 } from "./CofferMarketplaceHandler.sol";
 
 /// @title CofferMarketplaceInvariantTest
-/// @notice Permissive invariant tests (fail_on_revert = false).
-///         Handlers silently return on invalid inputs; reverts are absorbed.
+/// @notice Invariant suite. Run with:  FOUNDRY_PROFILE=invariants forge test -vv
+/// @dev Strict is the only mode: [invariant] fail_on_revert = true in foundry.toml. The handler
+///      predicts every marketplace revert with an exact vm.expectRevert oracle and asserts
+///      settlement postconditions on every fill, so an unexpected revert, an oracle mismatch or a
+///      failed postcondition fails the run with a counterexample. Under fail_on_revert = false both
+///      would be silently swallowed, which is why no permissive profile exists.
+///      Each invariant_* function is its own fuzz campaign. afterInvariant() prints the handler
+///      counters of a campaign's last run at -vv; forge's metrics table (show_metrics, on by
+///      default) gives the campaign-wide calls, reverts and discards per handler selector, and
+///      must show zero reverts.
 contract CofferMarketplaceInvariantTest is Test {
     CofferMarketplace public marketplace;
     MockBondNftForHandler public bondNft;
@@ -23,7 +31,7 @@ contract CofferMarketplaceInvariantTest is Test {
     address public mpOwner = makeAddr("mpOwner");
     address public feeRecipient = makeAddr("feeRecipient");
 
-    function setUp() public virtual {
+    function setUp() public {
         vm.warp(100_000);
 
         coffer = new MockCofferForHandler();
@@ -61,8 +69,15 @@ contract CofferMarketplaceInvariantTest is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Category 2, Ghost-to-Chain Consistency (nonce mirroring)
+    //  Category 2, Predicted ghost state vs chain
     // ═══════════════════════════════════════════════════════════════
+
+    // The handler never reads nonces or ownership back from the chain. It predicts them: a fill
+    // or a single cancel advances exactly one per-bond nonce by one, cancelAll advances exactly
+    // the global nonce by one, a fill moves the NFT to the taker. These invariants compare the
+    // prediction with the chain for every (actor, bond) key, so a bump of the wrong key, by the
+    // wrong amount, or a missing bump fails here (and, for nonces, also as an oracle mismatch at
+    // the handler's next fill attempt).
 
     function invariant_listingNoncesMatchOnChain() public view {
         uint256 numActors = handler.getActorsLength();
@@ -115,86 +130,63 @@ contract CofferMarketplaceInvariantTest is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Category 3, Structural Integrity
+    //  Summary (last run of each campaign, printed at -vv)
     // ═══════════════════════════════════════════════════════════════
 
-    function invariant_bondOwnershipIsTracked() public view {
-        uint256 count = handler.getMintedBondCount();
-        for (uint256 i; i < count; ++i) {
-            uint256 bondId = handler.getMintedBondIdAt(i);
-            address owner = handler.ghostBondOwner(bondId);
-            assertTrue(owner != address(0), "Every minted bond must have a ghost owner");
-        }
+    function afterInvariant() public view {
+        console2.log("--- Handler calls ---");
+        console2.log("mintBond:                 ", handler.callsMintBond());
+        console2.log("signListing:              ", handler.callsSignListing());
+        console2.log("cancelListing:            ", handler.callsCancelListing());
+        console2.log("cancelAllListings:        ", handler.callsCancelAllListings());
+        console2.log("buySignedListing:         ", handler.callsBuySignedListing());
+        console2.log("signOffer:                ", handler.callsSignOffer());
+        console2.log("cancelOffer:              ", handler.callsCancelOffer());
+        console2.log("cancelAllOffers:          ", handler.callsCancelAllOffers());
+        console2.log("acceptSignedOffer:        ", handler.callsAcceptSignedOffer());
+        console2.log("warpTime:                 ", handler.callsWarpTime());
+        console2.log("setNonOutstanding:        ", handler.callsSetNonOutstanding());
+        console2.log("transferNft:              ", handler.callsTransferNft());
+        console2.log("--- Orders ---");
+        console2.log("mintedBonds:              ", handler.getMintedBondCount());
+        console2.log("listingsCreated:          ", handler.ghostTotalListingsCreated());
+        console2.log("listingsPurchased:        ", handler.ghostTotalListingsPurchased());
+        console2.log("listingsCancelled:        ", handler.ghostTotalListingsCancelled());
+        console2.log("listingsRevoked:          ", handler.ghostTotalListingsRevoked());
+        console2.log("cancelAll throttled:      ", handler.skippedCancelAllListingsThrottled());
+        console2.log("offersMade:               ", handler.ghostTotalOffersMade());
+        console2.log("offersAccepted:           ", handler.ghostTotalOffersAccepted());
+        console2.log("offersCancelled:          ", handler.ghostTotalOffersCancelled());
+        console2.log("offersRevoked:            ", handler.ghostTotalOffersRevoked());
+        console2.log("cancelAll throttled:      ", handler.skippedCancelAllOffersThrottled());
+        console2.log("--- Oracle: buy attempts rejected as predicted ---");
+        console2.log("SameParty:                ", _buyRejected(CofferMarketplace.SameParty.selector));
+        console2.log("ListingRevoked:           ", _buyRejected(CofferMarketplace.ListingRevoked.selector));
+        console2.log("SellerNoLongerOwnsNft:    ", _buyRejected(CofferMarketplace.SellerNoLongerOwnsNft.selector));
+        console2.log("ExpirationNotInFuture:    ", _buyRejected(CofferMarketplace.ExpirationNotInFuture.selector));
+        console2.log("BondNotOutstanding:       ", _buyRejected(CofferMarketplace.BondNotOutstanding.selector));
+        console2.log("MaturityValueMismatch:    ", _buyRejected(CofferMarketplace.MaturityValueMismatch.selector));
+        console2.log("replays after a fill:     ", handler.ghostBuyReplaysRejected());
+        console2.log("skipped, no order signed: ", handler.skippedBuyNoOrder());
+        console2.log("skipped, buyer ETH short: ", handler.skippedBuyInsufficientEth());
+        console2.log("--- Oracle: accept attempts rejected as predicted ---");
+        console2.log("SameParty:                ", _acceptRejected(CofferMarketplace.SameParty.selector));
+        console2.log("OfferRevoked:             ", _acceptRejected(CofferMarketplace.OfferRevoked.selector));
+        console2.log("NotOwner:                 ", _acceptRejected(CofferMarketplace.NotOwner.selector));
+        console2.log("ExpirationNotInFuture:    ", _acceptRejected(CofferMarketplace.ExpirationNotInFuture.selector));
+        console2.log("BondNotOutstanding:       ", _acceptRejected(CofferMarketplace.BondNotOutstanding.selector));
+        console2.log("MaturityValueMismatch:    ", _acceptRejected(CofferMarketplace.MaturityValueMismatch.selector));
+        console2.log("FeeExceedsMax:            ", _acceptRejected(CofferMarketplace.FeeExceedsMax.selector));
+        console2.log("InsufficientPayment:      ", _acceptRejected(CofferMarketplace.InsufficientPayment.selector));
+        console2.log("replays after a fill:     ", handler.ghostAcceptReplaysRejected());
+        console2.log("skipped, no order signed: ", handler.skippedAcceptNoOrder());
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    //  Category 4, Lifecycle Accounting
-    // ═══════════════════════════════════════════════════════════════
-
-    function invariant_listingLifecycle_nonNegative() public view {
-        uint256 created = handler.ghostTotalListingsCreated();
-        uint256 purchased = handler.ghostTotalListingsPurchased();
-        uint256 cancelled = handler.ghostTotalListingsCancelled();
-        uint256 revoked = handler.ghostTotalListingsRevoked();
-        assertLe(purchased + cancelled + revoked, created, "Listings resolved exceed created");
+    function _buyRejected(bytes4 selector) internal view returns (uint256) {
+        return handler.ghostBuyRejectedBySelector(selector);
     }
 
-    function invariant_offerLifecycle_nonNegative() public view {
-        uint256 made = handler.ghostTotalOffersMade();
-        uint256 accepted = handler.ghostTotalOffersAccepted();
-        uint256 cancelled = handler.ghostTotalOffersCancelled();
-        uint256 revoked = handler.ghostTotalOffersRevoked();
-        assertLe(accepted + cancelled + revoked, made, "Offers resolved exceed made");
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  Category 5, Bond Integrity
-    // ═══════════════════════════════════════════════════════════════
-
-    /// @notice The handler's per-bond outstanding flag must always mirror the on-chain coffer state.
-    /// @dev "Listed ⇒ outstanding" is NOT a protocol invariant: a bond can become non-outstanding
-    ///      (maturity / redemption, modelled by handlerSetNonOutstanding) while a listing signature
-    ///      still exists, the marketplace simply makes that listing unfillable (buySignedListing
-    ///      reverts BondNotOutstanding) rather than cancelling it. So we assert the ghost-vs-chain
-    ///      mirror instead, analogous to the nonce and NFT-ownership mirror invariants.
-    function invariant_bondOutstandingMatchesChain() public view {
-        uint256 numBonds = handler.getMintedBondCount();
-        for (uint256 j; j < numBonds; ++j) {
-            uint256 bondId = handler.getMintedBondIdAt(j);
-            bool chainOutstanding = coffer.maturityValues(bondId) != 0;
-            assertEq(
-                handler.ghostBondOutstanding(bondId), chainOutstanding, "Ghost outstanding flag desynced from chain"
-            );
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    //  Category 6, Debug
-    // ═══════════════════════════════════════════════════════════════
-
-    function invariant_callSummary() public view {
-        console2.log("--- Call Summary ---");
-        console2.log("mintBond:              ", handler.callsMintBond());
-        console2.log("signListing:           ", handler.callsSignListing());
-        console2.log("cancelListing:         ", handler.callsCancelListing());
-        console2.log("cancelAllListings:     ", handler.callsCancelAllListings());
-        console2.log("buySignedListing:      ", handler.callsBuySignedListing());
-        console2.log("signOffer:             ", handler.callsSignOffer());
-        console2.log("cancelOffer:           ", handler.callsCancelOffer());
-        console2.log("cancelAllOffers:       ", handler.callsCancelAllOffers());
-        console2.log("acceptSignedOffer:     ", handler.callsAcceptSignedOffer());
-        console2.log("warpTime:              ", handler.callsWarpTime());
-        console2.log("setNonOutstanding:     ", handler.callsSetNonOutstanding());
-        console2.log("transferNft:           ", handler.callsTransferNft());
-        console2.log("--- Ghost Counters ---");
-        console2.log("mintedBonds:           ", handler.getMintedBondCount());
-        console2.log("listingsCreated:       ", handler.ghostTotalListingsCreated());
-        console2.log("listingsPurchased:     ", handler.ghostTotalListingsPurchased());
-        console2.log("listingsCancelled:     ", handler.ghostTotalListingsCancelled());
-        console2.log("listingsRevoked:       ", handler.ghostTotalListingsRevoked());
-        console2.log("offersMade:            ", handler.ghostTotalOffersMade());
-        console2.log("offersAccepted:        ", handler.ghostTotalOffersAccepted());
-        console2.log("offersCancelled:       ", handler.ghostTotalOffersCancelled());
-        console2.log("offersRevoked:         ", handler.ghostTotalOffersRevoked());
+    function _acceptRejected(bytes4 selector) internal view returns (uint256) {
+        return handler.ghostAcceptRejectedBySelector(selector);
     }
 }

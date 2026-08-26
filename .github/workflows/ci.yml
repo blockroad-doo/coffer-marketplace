@@ -106,3 +106,41 @@ jobs:
           forge coverage
           --no-match-coverage "^test/|^script/"
           --report summary
+
+  invariant:
+    name: Invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.7.1
+          cache: false
+
+      # The invariant fuzzer's RNG is seeded from fuzz.seed (there is no invariant.seed), so the
+      # same weekly seed as the unit job makes a given week's run reproducible locally.
+      - name: Set weekly fuzz seed
+        run: >
+          echo "FOUNDRY_FUZZ_SEED=$(
+            echo $(($EPOCHSECONDS / 604800))
+          )" >> $GITHUB_ENV
+
+      - name: Build
+        run: forge build
+
+      # A misspelled or missing profile only warns on stderr, falls back to the default profile
+      # (which excludes test/invariant), reports "No tests match" and exits 0. Fail loudly instead.
+      - name: Check the profile selects the invariant suite
+        run: >
+          FOUNDRY_PROFILE=invariants forge test --list
+          | grep -q "invariant_ethConservation"
+
+      - name: Run invariant tests
+        run: >
+          FOUNDRY_PROFILE=invariants FOUNDRY_INVARIANT_RUNS=256 forge test
+          -vvv
+          --show-progress
