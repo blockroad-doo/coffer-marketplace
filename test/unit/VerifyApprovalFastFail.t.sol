@@ -29,7 +29,7 @@ contract VerifyApprovalFastFailTest is Test {
         "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -39,7 +39,7 @@ contract VerifyApprovalFastFailTest is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("3")),
+                keccak256(bytes("4")),
                 block.chainid,
                 address(marketplace)
             )
@@ -57,17 +57,12 @@ contract VerifyApprovalFastFailTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    function _signOffer(
-        uint256 pk,
-        uint256 bId,
-        uint128 wAmt,
-        uint128 mat,
-        uint64 exp,
-        uint256 maxF,
-        uint256 nonce,
-        uint256 gNonce
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, maxF, nonce, gNonce));
+    function _signOffer(uint256 pk, uint256 bId, uint128 wAmt, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, nonce, gNonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
@@ -107,7 +102,7 @@ contract VerifyApprovalFastFailTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.MarketplaceNotApproved.selector);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, 1 ether, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, 1 ether, exp, nonce, 0, sig);
     }
 
     // The approval check runs before signature verification: even with an empty signature, a fill on an
@@ -122,7 +117,7 @@ contract VerifyApprovalFastFailTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.MarketplaceNotApproved.selector);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, 1 ether, exp, nonce, 0, 0, "");
+        marketplace.buySignedListing{value: price}(bondId, seller, price, 1 ether, exp, nonce, 0, "");
     }
 
     // The same fast-fail already holds on the accept path: the owner revokes approval after the offerer
@@ -131,13 +126,13 @@ contract VerifyApprovalFastFailTest is Test {
         uint128 amount = 1 ether;
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
-        bytes memory sig = _signOffer(BUYER_PK, bondId, amount, 1 ether, exp, type(uint256).max, nonce, 0);
+        bytes memory sig = _signOffer(BUYER_PK, bondId, amount, 1 ether, exp, nonce, 0);
 
         vm.prank(seller);
         bondNft.setApprovalForAll(address(marketplace), false);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.MarketplaceNotApproved.selector);
-        marketplace.acceptSignedOffer(bondId, buyer, amount, 1 ether, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, amount, 1 ether, exp, nonce, 0, sig);
     }
 }

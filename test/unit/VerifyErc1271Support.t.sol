@@ -202,7 +202,7 @@ contract VerifyErc1271SupportTest is Test {
         "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -212,7 +212,7 @@ contract VerifyErc1271SupportTest is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("3")),
+                keccak256(bytes("4")),
                 block.chainid,
                 address(marketplace)
             )
@@ -230,20 +230,20 @@ contract VerifyErc1271SupportTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    function _signOffer(
-        uint256 pk,
-        uint256 bId,
-        uint128 wAmt,
-        uint128 mat,
-        uint64 exp,
-        uint256 maxF,
-        uint256 nonce,
-        uint256 gNonce
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, maxF, nonce, gNonce));
+    function _signOffer(uint256 pk, uint256 bId, uint128 wAmt, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, nonce, gNonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    /// @dev The fee the contract charges on a profit, from its published constants.
+    function _fee(uint256 profit) internal view returns (uint256) {
+        return (profit * marketplace.FEE_BPS()) / marketplace.BPS_DENOMINATOR();
     }
 
     /// @dev Flip a 65-byte signature to its high-s counterpart, which ECDSA must reject.
@@ -304,8 +304,9 @@ contract VerifyErc1271SupportTest is Test {
         bytes memory sig = _signListing(WALLET_OWNER_PK, wBond, price, mat, exp, nonce, 0);
 
         uint256 wBalBefore = address(w).balance;
+        uint256 fee = _fee(4 ether);
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(wBond, address(w), price, mat, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: price + fee}(wBond, address(w), price, mat, exp, nonce, 0, sig);
 
         assertEq(bondNft.ownerOf(wBond), buyer, "buyer should own the bond");
         assertEq(address(w).balance - wBalBefore, price, "wallet should receive ETH");
@@ -320,17 +321,17 @@ contract VerifyErc1271SupportTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(address(w), bondId);
         uint128 mat = coffer.maturityValues(bondId);
-        bytes memory sig = _signOffer(WALLET_OWNER_PK, bondId, amount, mat, exp, type(uint256).max, nonce, 0);
+        bytes memory sig = _signOffer(WALLET_OWNER_PK, bondId, amount, mat, exp, nonce, 0);
 
         uint256 sellerWethBefore = weth.balanceOf(seller);
         uint256 walletWethBefore = weth.balanceOf(address(w));
 
         vm.prank(seller);
-        marketplace.acceptSignedOffer(bondId, address(w), amount, mat, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, address(w), amount, mat, exp, nonce, 0, sig);
 
         assertEq(bondNft.ownerOf(bondId), address(w), "wallet should own the bond");
         assertEq(weth.balanceOf(seller) - sellerWethBefore, amount, "seller should receive WETH");
-        assertEq(walletWethBefore - weth.balanceOf(address(w)), amount, "wallet should pay WETH");
+        assertEq(walletWethBefore - weth.balanceOf(address(w)), amount + _fee(4 ether), "wallet pays amount plus fee");
     }
 
     // ───── Re-validation at fill (revocable ERC-1271) ─────
@@ -352,7 +353,7 @@ contract VerifyErc1271SupportTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
-        marketplace.buySignedListing{value: price}(wBond, address(w), price, mat, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: price}(wBond, address(w), price, mat, exp, nonce, 0, sig);
     }
 
     function test_revokeBetweenSignAndAccept_failsAtFill() public {
@@ -364,13 +365,13 @@ contract VerifyErc1271SupportTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(address(w), bondId);
         uint128 mat = coffer.maturityValues(bondId);
-        bytes memory sig = _signOffer(WALLET_OWNER_PK, bondId, amount, mat, exp, type(uint256).max, nonce, 0);
+        bytes memory sig = _signOffer(WALLET_OWNER_PK, bondId, amount, mat, exp, nonce, 0);
 
         w.setAuthorized(false);
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
-        marketplace.acceptSignedOffer(bondId, address(w), amount, mat, exp, type(uint256).max, nonce, 0, sig);
+        marketplace.acceptSignedOffer(bondId, address(w), amount, mat, exp, nonce, 0, sig);
     }
 
     // ───── Rejection cases ─────
@@ -390,7 +391,7 @@ contract VerifyErc1271SupportTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
-        marketplace.buySignedListing{value: price}(wBond, address(w), price, mat, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: price}(wBond, address(w), price, mat, exp, nonce, 0, sig);
     }
 
     function test_rejectsRevertingWallet() public {
@@ -405,7 +406,7 @@ contract VerifyErc1271SupportTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
-        marketplace.buySignedListing{value: 1 ether}(wBond, address(w), 1 ether, mat, exp, nonce, 0, 0, "");
+        marketplace.buySignedListing{value: 1 ether}(wBond, address(w), 1 ether, mat, exp, nonce, 0, "");
     }
 
     // ───── EOA path still works (no domain bump, existing signatures verify) ─────
@@ -417,8 +418,9 @@ contract VerifyErc1271SupportTest is Test {
         uint128 mat = coffer.maturityValues(bondId);
         bytes memory sig = _signListing(SELLER_PK, bondId, price, mat, exp, nonce, 0);
 
+        uint256 fee = _fee(4 ether);
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, mat, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: price + fee}(bondId, seller, price, mat, exp, nonce, 0, sig);
         assertEq(bondNft.ownerOf(bondId), buyer);
     }
 
@@ -432,7 +434,7 @@ contract VerifyErc1271SupportTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, mat, exp, nonce, 0, 0, bad);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, mat, exp, nonce, 0, bad);
     }
 
     function test_zeroAddressSellerRejected() public {
@@ -446,7 +448,7 @@ contract VerifyErc1271SupportTest is Test {
         // signature verification is reached. The contract never treats address(0) as a valid signer.
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.SellerNoLongerOwnsNft.selector);
-        marketplace.buySignedListing{value: price}(bondId, address(0), price, mat, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: price}(bondId, address(0), price, mat, exp, nonce, 0, sig);
     }
 
     function test_wrongSignerForEoaRejected() public {
@@ -466,7 +468,7 @@ contract VerifyErc1271SupportTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
-        marketplace.buySignedListing{value: price}(b2Bond, buyer2, price, mat, exp, nonce, 0, 0, sig);
+        marketplace.buySignedListing{value: price}(b2Bond, buyer2, price, mat, exp, nonce, 0, sig);
     }
 
     // ───── Confinement: a magic-for-everything wallet only harms itself ─────
@@ -482,8 +484,9 @@ contract VerifyErc1271SupportTest is Test {
         uint256 nonce = marketplace.sListingNonce(address(w), wBond);
         uint128 mat = coffer.maturityValues(wBond);
 
+        uint256 fee = _fee(4 ether);
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(wBond, address(w), price, mat, exp, nonce, 0, 0, "");
+        marketplace.buySignedListing{value: price + fee}(wBond, address(w), price, mat, exp, nonce, 0, "");
         assertEq(bondNft.ownerOf(wBond), buyer);
     }
 
@@ -498,7 +501,7 @@ contract VerifyErc1271SupportTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.SellerNoLongerOwnsNft.selector);
-        marketplace.buySignedListing{value: price}(bondId, address(w), price, mat, exp, nonce, 0, 0, "");
+        marketplace.buySignedListing{value: price}(bondId, address(w), price, mat, exp, nonce, 0, "");
     }
 
     // ───── A contract wallet can revoke via cancelAll ─────
@@ -522,6 +525,6 @@ contract VerifyErc1271SupportTest is Test {
         // The order signed at global nonce 0 is now revoked
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
-        marketplace.buySignedListing{value: price}(wBond, address(w), price, mat, exp, 0, 0, 0, sig);
+        marketplace.buySignedListing{value: price}(wBond, address(w), price, mat, exp, 0, 0, sig);
     }
 }

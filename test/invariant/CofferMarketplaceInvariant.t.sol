@@ -176,7 +176,6 @@ contract CofferMarketplaceInvariantTest is Test {
         console2.log("ExpirationNotInFuture:    ", _acceptRejected(CofferMarketplace.ExpirationNotInFuture.selector));
         console2.log("BondNotOutstanding:       ", _acceptRejected(CofferMarketplace.BondNotOutstanding.selector));
         console2.log("MaturityValueMismatch:    ", _acceptRejected(CofferMarketplace.MaturityValueMismatch.selector));
-        console2.log("FeeExceedsMax:            ", _acceptRejected(CofferMarketplace.FeeExceedsMax.selector));
         console2.log("InsufficientPayment:      ", _acceptRejected(CofferMarketplace.InsufficientPayment.selector));
         console2.log("replays after a fill:     ", handler.ghostAcceptReplaysRejected());
         console2.log("skipped, no order signed: ", handler.skippedAcceptNoOrder());

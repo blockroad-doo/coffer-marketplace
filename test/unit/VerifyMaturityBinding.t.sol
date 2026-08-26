@@ -34,7 +34,7 @@ contract VerifyMaturityBindingTest is Test {
         "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -44,7 +44,7 @@ contract VerifyMaturityBindingTest is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("3")),
+                keccak256(bytes("4")),
                 block.chainid,
                 address(marketplace)
             )
@@ -62,16 +62,12 @@ contract VerifyMaturityBindingTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    function _signOffer(
-        uint256 pk,
-        uint128 amount,
-        uint128 mat,
-        uint64 exp,
-        uint256 maxFee,
-        uint256 nonce,
-        uint256 gNonce
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bondId, amount, mat, exp, maxFee, nonce, gNonce));
+    function _signOffer(uint256 pk, uint128 amount, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bondId, amount, mat, exp, nonce, gNonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
@@ -96,10 +92,6 @@ contract VerifyMaturityBindingTest is Test {
         weth.mint(buyer, 100 ether);
         vm.prank(buyer);
         weth.approve(address(marketplace), type(uint256).max);
-
-        // Nonzero profit-based fees on both sides so the fee paths are exercised under the binding.
-        vm.prank(mpOwner);
-        marketplace.setFeeBps(250, 250);
     }
 
     /// @notice M-01 core: the holder (who is also the offer taker) collapses the bond's maturity
@@ -109,7 +101,7 @@ contract VerifyMaturityBindingTest is Test {
         uint128 wethAmount = 9 ether;
         uint64 exp = uint64(block.timestamp + 7 days);
         // The maker signs against the live 10-ether maturity.
-        bytes memory sig = _signOffer(BUYER_PK, wethAmount, 10 ether, exp, type(uint256).max, 0, 0);
+        bytes memory sig = _signOffer(BUYER_PK, wethAmount, 10 ether, exp, 0, 0);
 
         // The holder collapses the bond to a husk after the offer is signed.
         coffer.setMaturityValue(1);
@@ -118,7 +110,7 @@ contract VerifyMaturityBindingTest is Test {
         // value is now 1, so the exact-match check reverts.
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.MaturityValueMismatch.selector);
-        marketplace.acceptSignedOffer(bondId, buyer, wethAmount, 10 ether, exp, type(uint256).max, 0, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, wethAmount, 10 ether, exp, 0, 0, sig);
     }
 
     /// @notice Listing-path sibling: the seller front-runs the buyer's purchase with a maturity collapse.
@@ -133,9 +125,7 @@ contract VerifyMaturityBindingTest is Test {
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.MaturityValueMismatch.selector);
-        marketplace.buySignedListing{value: price + 1 ether}(
-            bondId, seller, price, 10 ether, exp, 0, 0, type(uint256).max, sig
-        );
+        marketplace.buySignedListing{value: price + 1 ether}(bondId, seller, price, 10 ether, exp, 0, 0, sig);
     }
 
     /// @notice Happy path offer: unchanged maturity settles and the profit-based WETH fee is charged.
@@ -143,18 +133,18 @@ contract VerifyMaturityBindingTest is Test {
         coffer.setMaturityValue(10 ether);
         uint128 wethAmount = 9 ether;
         uint64 exp = uint64(block.timestamp + 7 days);
-        bytes memory sig = _signOffer(BUYER_PK, wethAmount, 10 ether, exp, type(uint256).max, 0, 0);
+        bytes memory sig = _signOffer(BUYER_PK, wethAmount, 10 ether, exp, 0, 0);
 
         uint256 sellerWethBefore = weth.balanceOf(seller);
         uint256 feeBefore = weth.balanceOf(address(marketplace));
 
         vm.prank(seller);
-        marketplace.acceptSignedOffer(bondId, buyer, wethAmount, 10 ether, exp, type(uint256).max, 0, 0, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, wethAmount, 10 ether, exp, 0, 0, sig);
 
-        // revenue = 10 - 9 = 1 ether, fee = 1 ether * 250 / 10000 = 0.025 ether.
+        // revenue = 10 - 9 = 1 ether, fee = 1 ether * 900 / 10000 = 0.09 ether.
         assertEq(bondNft.ownerOf(bondId), buyer, "buyer received the bond");
         assertEq(weth.balanceOf(seller) - sellerWethBefore, wethAmount, "seller received the full WETH amount");
-        assertEq(weth.balanceOf(address(marketplace)) - feeBefore, 0.025 ether, "profit-based WETH fee charged");
+        assertEq(weth.balanceOf(address(marketplace)) - feeBefore, 0.09 ether, "profit-based WETH fee charged");
     }
 
     /// @notice Happy path listing: unchanged maturity settles and the profit-based ETH fee is charged.
@@ -166,14 +156,12 @@ contract VerifyMaturityBindingTest is Test {
 
         uint256 feeBefore = address(marketplace).balance;
 
-        // profit = 10 - 9 = 1 ether, fee = 0.025 ether. Buyer pays price + fee.
+        // profit = 10 - 9 = 1 ether, fee = 0.09 ether. Buyer pays price + fee.
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price + 0.025 ether}(
-            bondId, seller, price, 10 ether, exp, 0, 0, type(uint256).max, sig
-        );
+        marketplace.buySignedListing{value: price + 0.09 ether}(bondId, seller, price, 10 ether, exp, 0, 0, sig);
 
         assertEq(bondNft.ownerOf(bondId), buyer, "buyer received the bond");
-        assertEq(address(marketplace).balance - feeBefore, 0.025 ether, "profit-based ETH fee charged");
+        assertEq(address(marketplace).balance - feeBefore, 0.09 ether, "profit-based ETH fee charged");
     }
 
     /// @notice The signed maturityValue is part of the EIP-712 digest, so a taker cannot forge it: a
@@ -189,8 +177,6 @@ contract VerifyMaturityBindingTest is Test {
         // 10 ether, so the reconstructed digest is wrong and verification fails before any value check.
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
-        marketplace.buySignedListing{value: price + 1 ether}(
-            bondId, seller, price, 8 ether, exp, 0, 0, type(uint256).max, sig
-        );
+        marketplace.buySignedListing{value: price + 1 ether}(bondId, seller, price, 8 ether, exp, 0, 0, sig);
     }
 }

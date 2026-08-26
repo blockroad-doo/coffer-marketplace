@@ -129,7 +129,7 @@ contract CofferMarketplaceHandler is Test {
         "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -164,7 +164,6 @@ contract CofferMarketplaceHandler is Test {
         uint128 amount;
         uint128 maturity;
         uint64 expiration;
-        uint256 maxFee;
         uint256 nonce;
         uint256 globalNonce;
     }
@@ -204,7 +203,6 @@ contract CofferMarketplaceHandler is Test {
     mapping(address => mapping(uint256 => uint128)) public ghostOfferSignedMaturity;
     mapping(address => mapping(uint256 => uint128)) public ghostOfferAmount;
     mapping(address => mapping(uint256 => uint64)) public ghostOfferExpiration;
-    mapping(address => mapping(uint256 => uint256)) public ghostOfferMaxFee;
 
     // ──── Ghost State: Bonds ────
 
@@ -376,7 +374,7 @@ contract CofferMarketplaceHandler is Test {
         // Every 8th seed the seller tries to fill its own listing, which the contract rejects first.
         uint256 m = _mix(buyerSeed);
         address buyer = m % 8 == 0 ? o.seller : _pickActorExcluding(m / 8, o.seller);
-        uint256 fee = _listingFee(o.maturity, o.price);
+        uint256 fee = _fee(o.maturity, o.price);
         // Overpay by a fuzzed excess so the refund leg is exercised on every successful fill.
         uint256 total = uint256(o.price) + fee + bound(excessSeed, 0, 1 ether);
         if (buyer.balance < total) {
@@ -410,7 +408,6 @@ contract CofferMarketplaceHandler is Test {
         ghostOfferSignedMaturity[buyer][bondId] = coffer.maturityValues(bondId);
         ghostOfferAmount[buyer][bondId] = amount;
         ghostOfferExpiration[buyer][bondId] = expiration;
-        ghostOfferMaxFee[buyer][bondId] = type(uint256).max;
         ++ghostTotalOffersMade;
     }
 
@@ -527,7 +524,7 @@ contract CofferMarketplaceHandler is Test {
         if (expected != bytes4(0)) {
             vm.prank(buyer);
             vm.expectRevert(expected, address(marketplace));
-            _callBuy(o, total, fee, sig);
+            _callBuy(o, total, sig);
             ++ghostBuyRejectedBySelector[expected];
             return;
         }
@@ -537,7 +534,7 @@ contract CofferMarketplaceHandler is Test {
         uint256 marketBefore = address(marketplace).balance;
 
         vm.prank(buyer);
-        _callBuy(o, total, fee, sig);
+        _callBuy(o, total, sig);
 
         _assertBuySettled(o, buyer, fee, sellerBefore, buyerBefore, marketBefore);
 
@@ -548,13 +545,13 @@ contract CofferMarketplaceHandler is Test {
         // The consumed signature must be dead: an identical replay fails on the nonce check.
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector, address(marketplace));
-        _callBuy(o, total, fee, sig);
+        _callBuy(o, total, sig);
         ++ghostBuyReplaysRejected;
     }
 
     /// @dev Mirrors the require order of buySignedListing after dropping the checks the handler
     ///      universe cannot trigger (ZeroPrice, MarketplaceNotApproved, InvalidSignature,
-    ///      FeeExceedsMax, InsufficientPayment). Returns 0 when the fill must succeed.
+    ///      InsufficientPayment). Returns 0 when the fill must succeed.
     function _expectedBuyRevert(ListingOrder memory o, address buyer) internal view returns (bytes4) {
         if (buyer == o.seller) return CofferMarketplace.SameParty.selector;
         if (o.nonce != ghostListingNonce[o.seller][o.bondId]) return CofferMarketplace.ListingRevoked.selector;
@@ -568,9 +565,9 @@ contract CofferMarketplaceHandler is Test {
         return bytes4(0);
     }
 
-    function _callBuy(ListingOrder memory o, uint256 value, uint256 maxFee, bytes memory sig) internal {
+    function _callBuy(ListingOrder memory o, uint256 value, bytes memory sig) internal {
         marketplace.buySignedListing{value: value}(
-            o.bondId, o.seller, o.price, o.maturity, o.expiration, o.nonce, o.globalNonce, maxFee, sig
+            o.bondId, o.seller, o.price, o.maturity, o.expiration, o.nonce, o.globalNonce, sig
         );
     }
 
@@ -592,10 +589,9 @@ contract CofferMarketplaceHandler is Test {
 
     /// @dev Attempt an accept of offer `o` by `caller`. Same contract as _attemptBuy.
     function _attemptAccept(OfferOrder memory o, address caller) internal {
-        uint256 fee = _offerFee(o.maturity, o.amount);
-        bytes memory sig = _signOffer(
-            actorPk[o.buyer], o.bondId, o.amount, o.maturity, o.expiration, o.maxFee, o.nonce, o.globalNonce
-        );
+        uint256 fee = _fee(o.maturity, o.amount);
+        bytes memory sig =
+            _signOffer(actorPk[o.buyer], o.bondId, o.amount, o.maturity, o.expiration, o.nonce, o.globalNonce);
 
         bytes4 expected = _expectedAcceptRevert(o, caller, fee);
         if (expected != bytes4(0)) {
@@ -640,7 +636,6 @@ contract CofferMarketplaceHandler is Test {
         uint128 live = coffer.maturityValues(o.bondId);
         if (live == 0) return CofferMarketplace.BondNotOutstanding.selector;
         if (live != o.maturity) return CofferMarketplace.MaturityValueMismatch.selector;
-        if (fee > o.maxFee) return CofferMarketplace.FeeExceedsMax.selector;
         uint256 totalWeth = uint256(o.amount) + fee;
         if (weth.balanceOf(o.buyer) < totalWeth) return CofferMarketplace.InsufficientPayment.selector;
         // The mock decrements the allowance on every transferFrom (real WETH short-circuits an
@@ -653,7 +648,7 @@ contract CofferMarketplaceHandler is Test {
 
     function _callAccept(OfferOrder memory o, bytes memory sig) internal {
         marketplace.acceptSignedOffer(
-            o.bondId, o.buyer, o.amount, o.maturity, o.expiration, o.maxFee, o.nonce, o.globalNonce, sig
+            o.bondId, o.buyer, o.amount, o.maturity, o.expiration, o.nonce, o.globalNonce, sig
         );
     }
 
@@ -681,16 +676,12 @@ contract CofferMarketplaceHandler is Test {
     //                      Internal: Fee math
     // ═══════════════════════════════════════════════════════════════
 
-    /// @dev Same formula as CofferMarketplace._feeOnProfit, from the live listing bps, so the
-    ///      settlement expectations stay exact once fees are switched on.
-    function _listingFee(uint128 maturity, uint128 price) internal view returns (uint256) {
-        uint256 profit = maturity > price ? uint256(maturity) - uint256(price) : 0;
-        return (profit * uint256(marketplace.sListingFeeBps())) / uint256(marketplace.BPS_DENOMINATOR());
-    }
-
-    function _offerFee(uint128 maturity, uint128 amount) internal view returns (uint256) {
-        uint256 revenue = maturity > amount ? uint256(maturity) - uint256(amount) : 0;
-        return (revenue * uint256(marketplace.sOfferFeeBps())) / uint256(marketplace.BPS_DENOMINATOR());
+    /// @dev Same formula as CofferMarketplace._feeOnProfit, from the contract's published constants,
+    ///      so the settlement expectations stay exact. The rate is the same on both paths, so one
+    ///      function serves the listing price and the offer amount alike.
+    function _fee(uint128 maturity, uint128 paid) internal view returns (uint256) {
+        uint256 profit = maturity > paid ? uint256(maturity) - uint256(paid) : 0;
+        return (profit * marketplace.FEE_BPS()) / marketplace.BPS_DENOMINATOR();
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -765,7 +756,6 @@ contract CofferMarketplaceHandler is Test {
             amount: ghostOfferAmount[buyer][bondId],
             maturity: ghostOfferSignedMaturity[buyer][bondId],
             expiration: ghostOfferExpiration[buyer][bondId],
-            maxFee: ghostOfferMaxFee[buyer][bondId],
             nonce: ghostOfferSignedNonce[buyer][bondId],
             globalNonce: ghostOfferSignedGlobalNonce[buyer][bondId]
         });
@@ -880,7 +870,7 @@ contract CofferMarketplaceHandler is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("3")),
+                keccak256(bytes("4")),
                 block.chainid,
                 address(marketplace)
             )
@@ -896,16 +886,12 @@ contract CofferMarketplaceHandler is Test {
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
     }
 
-    function _offerDigest(
-        uint256 bId,
-        uint128 wAmt,
-        uint128 mat,
-        uint64 exp,
-        uint256 maxF,
-        uint256 nonce,
-        uint256 gNonce
-    ) internal view returns (bytes32) {
-        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, maxF, nonce, gNonce));
+    function _offerDigest(uint256 bId, uint128 wAmt, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, nonce, gNonce));
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
     }
 
@@ -919,17 +905,12 @@ contract CofferMarketplaceHandler is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    function _signOffer(
-        uint256 pk,
-        uint256 bId,
-        uint128 wAmt,
-        uint128 mat,
-        uint64 exp,
-        uint256 maxF,
-        uint256 nonce,
-        uint256 gNonce
-    ) internal view returns (bytes memory) {
-        bytes32 digest = _offerDigest(bId, wAmt, mat, exp, maxF, nonce, gNonce);
+    function _signOffer(uint256 pk, uint256 bId, uint128 wAmt, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes32 digest = _offerDigest(bId, wAmt, mat, exp, nonce, gNonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }

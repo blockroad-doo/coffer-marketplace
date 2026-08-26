@@ -20,9 +20,10 @@ import {IWETH} from "./interfaces/IWETH.sol";
 ///         which verify the maker signature at that moment. Both EOA and ERC-1271 contract wallets,
 ///         such as Safe and ERC-4337 accounts, are supported. Makers cancel on-chain by bumping a
 ///         nonce, which is the only way to revoke an outstanding signature.
-/// @notice A profit-based percentage fee is charged only on a completed trade, on buySignedListing
-///         (paid in ETH) and on acceptSignedOffer (paid in WETH). See the Fee Flow section of the
-///         README for the fee philosophy.
+/// @notice A fixed fee of FEE_BPS (900 basis points, 9%) of the buyer's profit, the maturity value
+///         minus the price when positive, is charged only on a completed trade: on buySignedListing
+///         paid in ETH by the buyer on top of the price, on acceptSignedOffer paid in WETH by the
+///         offerer on top of the offer amount. See the Fee Flow section of the README.
 contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
 
@@ -39,8 +40,6 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     error MarketplaceNotApproved();
     error ExpirationNotInFuture();
     error InsufficientPayment();
-    error FeeExceedsMax();
-    error FeeTooHigh();
     error NothingToClaim();
     error NothingToClaimWeth();
     error InvalidSignature();
@@ -56,14 +55,18 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 private constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 maxFee,uint256 nonce,uint256 globalNonce)"
+        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     /* solhint-enable gas-small-strings, max-line-length */
 
     // ───── Constants ─────
 
     /// @notice Basis points denominator (100% = 10000)
-    uint16 public constant BPS_DENOMINATOR = 10000;
+    uint256 public constant BPS_DENOMINATOR = 10000;
+
+    /// @notice Fee on the buyer's profit in basis points, the same for listings and offers. A
+    ///         constant, there is no setter.
+    uint256 public constant FEE_BPS = 900;
 
     /// @notice Gas forwarded to the seller when paying a listing price in ETH. A seller whose
     ///         receive costs more than this is paid in WETH through the fallback instead. Takers
@@ -80,10 +83,6 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
     /// @notice The address that receives collected fees on claim
     address public sFeeRecipient;
-    /// @notice Profit-based fee in basis points charged on buySignedListing, paid in ETH
-    uint16 public sListingFeeBps;
-    /// @notice Profit-based fee in basis points charged on acceptSignedOffer, paid in WETH
-    uint16 public sOfferFeeBps;
 
     /// @notice Global listing nonce per seller, bumped by cancelAllListings
     mapping(address account => uint256 nonce) public sGlobalListingNonce;
@@ -166,10 +165,6 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     /// @notice Emitted when the fee recipient is updated
     /// @param recipient The new fee recipient address
     event FeeRecipientSet(address indexed recipient);
-    /// @notice Emitted when the profit-based fee basis points are configured
-    /// @param listingFeeBps The buySignedListing fee in basis points
-    /// @param offerFeeBps The acceptSignedOffer fee in basis points
-    event FeeBpsSet(uint16 listingFeeBps, uint16 offerFeeBps);
     /// @notice Emitted when ETH fees are claimed
     /// @param recipient The address that received the fees
     /// @param amount The amount of ETH claimed
@@ -193,7 +188,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     ///      well. It cannot tell a wrong contract from the right one, which is a deployment concern.
     constructor(address _weth, address _cofferBondNft, address _owner, address _feeRecipient)
         Ownable(_owner)
-        EIP712("CofferMarketplace", "3")
+        EIP712("CofferMarketplace", "4")
     {
         require(_weth.code.length > 0, NotAContract());
         require(_cofferBondNft.code.length > 0, NotAContract());
@@ -208,9 +203,9 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
     /// @notice Renouncing ownership is permanently disabled.
     /// @dev Overrides Ownable.renounceOwnership to always revert, so the owner can never become
-    ///      address(0). That would otherwise permanently freeze fee configuration and lock accrued
-    ///      fees, since the contract is non-upgradeable. Transfer ownership via the two-step
-    ///      transferOwnership and acceptOwnership flow instead.
+    ///      address(0). That would otherwise permanently lock accrued fees, since nobody could claim
+    ///      them or change the recipient, and the contract is non-upgradeable. Transfer ownership
+    ///      via the two-step transferOwnership and acceptOwnership flow instead.
     function renounceOwnership() public view override onlyOwner {
         revert RenounceOwnershipDisabled();
     }
@@ -221,17 +216,6 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         require(_recipient != address(0), ZeroAddress());
         sFeeRecipient = _recipient;
         emit FeeRecipientSet(_recipient);
-    }
-
-    /// @notice Configure the profit-based fees, in basis points, for the two trade actions
-    /// @param _listingFeeBps The buySignedListing fee in basis points (paid in ETH)
-    /// @param _offerFeeBps The acceptSignedOffer fee in basis points (paid in WETH)
-    function setFeeBps(uint16 _listingFeeBps, uint16 _offerFeeBps) external onlyOwner {
-        require(_listingFeeBps < BPS_DENOMINATOR, FeeTooHigh());
-        require(_offerFeeBps < BPS_DENOMINATOR, FeeTooHigh());
-        sListingFeeBps = _listingFeeBps;
-        sOfferFeeBps = _offerFeeBps;
-        emit FeeBpsSet(_listingFeeBps, _offerFeeBps);
     }
 
     /// @notice Claim accumulated ETH fees to the fee recipient.
@@ -295,17 +279,13 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         uint128 _wethAmount,
         uint128 _maturityValue,
         uint64 _expiration,
-        uint256 _maxFee,
         uint256 _nonce,
         uint256 _globalNonce,
         bytes calldata _sig
     ) internal view {
         bytes32 digest = _hashTypedDataV4(
             keccak256(
-                // solhint-disable-next-line max-line-length
-                abi.encode(
-                    OFFER_TYPEHASH, _bondId, _wethAmount, _maturityValue, _expiration, _maxFee, _nonce, _globalNonce
-                )
+                abi.encode(OFFER_TYPEHASH, _bondId, _wethAmount, _maturityValue, _expiration, _nonce, _globalNonce)
             )
         );
         require(SignatureChecker.isValidSignatureNowCalldata(_signer, digest, _sig), InvalidSignature());
@@ -351,7 +331,6 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     /// @param _expiration The listing expiration from the signed message
     /// @param _nonce The signed nonce (must equal current per-bond nonce)
     /// @param _globalNonce The signed global nonce (must equal current global nonce)
-    /// @param _maxFee The maximum ETH buy fee the buyer is willing to pay
     /// @param _sig The EIP-712 signature
     function buySignedListing(
         uint256 _bondId,
@@ -361,7 +340,6 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         uint64 _expiration,
         uint256 _nonce,
         uint256 _globalNonce,
-        uint256 _maxFee,
         bytes calldata _sig
     ) external payable nonReentrant {
         require(msg.sender != _seller, SameParty());
@@ -384,7 +362,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         require(maturityValue != 0, BondNotOutstanding());
         require(maturityValue == _maturityValue, MaturityValueMismatch());
         uint256 profit = maturityValue > _price ? uint256(maturityValue) - uint256(_price) : 0;
-        uint256 fee = _feeOnProfit(profit, sListingFeeBps, _maxFee);
+        uint256 fee = _feeOnProfit(profit);
 
         uint256 total = uint256(_price) + fee;
         // solhint-disable-next-line gas-strict-inequalities
@@ -427,14 +405,12 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         emit AllOffersCancelled(msg.sender, newGlobalNonce);
     }
 
-    /// @notice Accept an EIP-712 signed offer. The offerer pays the WETH fee computed from
-    ///         current config. Reverts with FeeExceedsMax if that fee exceeds the signed maxOfferFee.
+    /// @notice Accept an EIP-712 signed offer. The offerer pays the WETH fee, FEE_BPS of the profit.
     /// @param _bondId The bond token ID
     /// @param _buyer The offerer address (signer of the offer)
     /// @param _wethAmount The WETH offer amount from the signed message
     /// @param _maturityValue The bond maturity value from the signed message, must equal the live value at fill
     /// @param _expiration The offer expiration from the signed message
-    /// @param _maxOfferFee The maximum WETH fee signed by the offerer
     /// @param _nonce The signed nonce (must equal current per-bond nonce)
     /// @param _globalNonce The signed global nonce (must equal current global nonce)
     /// @param _sig The EIP-712 signature
@@ -444,7 +420,6 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         uint128 _wethAmount,
         uint128 _maturityValue,
         uint64 _expiration,
-        uint256 _maxOfferFee,
         uint256 _nonce,
         uint256 _globalNonce,
         bytes calldata _sig
@@ -463,16 +438,13 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
         _validateTrade(_expiration);
 
-        // solhint-disable-next-line max-line-length
-        _verifyOfferSig(
-            _buyer, _bondId, _wethAmount, _maturityValue, _expiration, _maxOfferFee, _nonce, _globalNonce, _sig
-        );
+        _verifyOfferSig(_buyer, _bondId, _wethAmount, _maturityValue, _expiration, _nonce, _globalNonce, _sig);
 
         uint128 maturityValue = _getBondMaturity(_bondId);
         require(maturityValue != 0, BondNotOutstanding());
         require(maturityValue == _maturityValue, MaturityValueMismatch());
         uint256 revenue = maturityValue > _wethAmount ? uint256(maturityValue) - uint256(_wethAmount) : 0;
-        uint256 fee = _feeOnProfit(revenue, sOfferFeeBps, _maxOfferFee);
+        uint256 fee = _feeOnProfit(revenue);
 
         ++sOfferNonce[_buyer][_bondId];
 
@@ -498,15 +470,11 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
     // ───── Internal: Fee Math ─────
 
-    /// @notice Compute a profit-based fee, profit * bps / BPS_DENOMINATOR, capped at the caller maximum.
+    /// @notice Compute the fee on a profit, profit * FEE_BPS / BPS_DENOMINATOR.
     /// @param _profit The profit the percentage is applied to
-    /// @param _bps The fee in basis points
-    /// @param _maxFee The maximum fee the caller is willing to pay
     /// @return fee The calculated fee
-    function _feeOnProfit(uint256 _profit, uint16 _bps, uint256 _maxFee) internal pure returns (uint256 fee) {
-        fee = (_profit * uint256(_bps)) / BPS_DENOMINATOR;
-        // solhint-disable-next-line gas-strict-inequalities
-        require(fee <= _maxFee, FeeExceedsMax());
+    function _feeOnProfit(uint256 _profit) internal pure returns (uint256 fee) {
+        fee = (_profit * FEE_BPS) / BPS_DENOMINATOR;
     }
 
     // ───── Internal: Bond Helpers ─────

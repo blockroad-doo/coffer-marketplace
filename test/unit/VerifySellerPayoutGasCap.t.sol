@@ -86,9 +86,8 @@ contract VerifySellerPayoutGasCapTest is Test {
 
     uint128 internal constant PRICE = 1 ether;
     uint128 internal constant MATURITY = 2 ether;
-    uint16 internal constant FEE_BPS = 1000; // 10% of profit
-    uint256 internal constant FEE = 0.1 ether; // 10% of (2 - 1)
-    uint256 internal constant TOTAL = 1.1 ether; // exact payment, so the refund leg is skipped
+    uint256 internal constant FEE = 0.09 ether; // 9% of (2 - 1)
+    uint256 internal constant TOTAL = 1.09 ether; // exact payment, so the refund leg is skipped
 
     uint64 internal expiration;
 
@@ -105,9 +104,6 @@ contract VerifySellerPayoutGasCapTest is Test {
         coffer = new MockCoffer();
         marketplace = new CofferMarketplace(address(weth), address(bondNft), mpOwner, feeRecipient);
 
-        vm.prank(mpOwner);
-        marketplace.setFeeBps(FEE_BPS, FEE_BPS);
-
         coffer.setMaturityValue(MATURITY);
         expiration = uint64(block.timestamp + 1 days);
         vm.deal(address(this), 100 ether);
@@ -119,7 +115,7 @@ contract VerifySellerPayoutGasCapTest is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("3")),
+                keccak256(bytes("4")),
                 block.chainid,
                 address(marketplace)
             )
@@ -156,7 +152,7 @@ contract VerifySellerPayoutGasCapTest is Test {
         returns (bool ok, uint256 used)
     {
         bytes memory data = abi.encodeCall(
-            CofferMarketplace.buySignedListing, (_bondId, _seller, PRICE, MATURITY, expiration, 0, 0, FEE, _sig)
+            CofferMarketplace.buySignedListing, (_bondId, _seller, PRICE, MATURITY, expiration, 0, 0, _sig)
         );
         vm.prank(buyer);
         (ok,) = address(marketplace).call{gas: _gasLimit, value: _value}(data);
@@ -195,7 +191,7 @@ contract VerifySellerPayoutGasCapTest is Test {
         (bool okBurn, uint256 usedBurn) = _fill(address(burner), burnerBond, "", 500_000);
         assertTrue(okBurn, "griefed fill must succeed");
 
-        // Measured with these mocks: 65,784 honest against 213,834 griefed.
+        // Measured with these mocks: 63,998 honest against 214,048 griefed.
         assertLt(usedBurn, 400_000, "griefed fill must stay bounded");
         assertLt(usedBurn, usedHonest * 5, "griefed fill must stay within a small multiple of honest");
     }
