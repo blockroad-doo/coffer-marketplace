@@ -2,6 +2,8 @@
 pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
+import {IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {ERC721Utils} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Utils.sol";
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
 
 // ───── Mock Contracts ─────
@@ -28,8 +30,19 @@ contract MockBondNft {
 
     function ownerOf(uint256 tokenId) external view returns (address) {
         address owner = _owners[tokenId];
-        require(owner != address(0), "ERC721: nonexistent token");
+        // The real ERC-721 reverts this custom error, and rows L10 and O8 name it: a burned bond
+        // fails inside ownerOf before the marketplace reaches its own maturity check. A string
+        // revert here would let those tests pass on the wrong evidence.
+        require(owner != address(0), IERC721Errors.ERC721NonexistentToken(tokenId));
         return owner;
+    }
+
+    /// @dev The real Coffer deletes the bond record and burns the NFT in one call
+    ///      (coffer-smart-contracts/src/Coffer.sol:695-696). Without a burn here no test can
+    ///      reach the burn path at all.
+    function burn(uint256 tokenId) external {
+        delete _owners[tokenId];
+        delete _coffers[tokenId];
     }
 
     function cofferOf(uint256 tokenId) external view returns (address) {
@@ -44,13 +57,10 @@ contract MockBondNft {
 
     function safeTransferFrom(address from, address to, uint256 tokenId) external {
         transferFrom(from, to, tokenId);
-        if (to.code.length > 0) {
-            require(
-                IERC721Receiver(to).onERC721Received(msg.sender, from, tokenId, "")
-                    == IERC721Receiver.onERC721Received.selector,
-                "ERC721: unsafe recipient"
-            );
-        }
+        // The same helper the real ERC-721 runs, so a receiver that refuses produces
+        // ERC721InvalidReceiver rather than a string. Row O12 names that error, and the code-bearing
+        // check inside it is what makes a 7702 delegate a receiver at all (ERC721Utils.sol:32).
+        ERC721Utils.checkOnERC721Received(msg.sender, from, to, tokenId, "");
     }
 
     function setApprovalForAll(address operator, bool approved) external {
@@ -72,8 +82,21 @@ contract MockCoffer {
         startTs = uint32(block.timestamp - 86401);
     }
 
-    function sHolderConditions(uint256) external view returns (uint128, uint32, uint32) {
+    mapping(uint256 => uint128) private _overrides;
+    mapping(uint256 => bool) private _hasOverride;
+
+    function sHolderConditions(uint256 bondId) external view returns (uint128, uint32, uint32) {
+        if (_hasOverride[bondId]) {
+            return (_overrides[bondId], duration, startTs);
+        }
         return (maturityValue, duration, startTs);
+    }
+
+    /// @dev Per-bond value, for tests that need several bonds to differ. Additive on purpose: the
+    ///      single-argument setMaturityValue below stays the default for every bond without one.
+    function setMaturityValueFor(uint256 bondId, uint128 _val) external {
+        _overrides[bondId] = _val;
+        _hasOverride[bondId] = true;
     }
 
     function setMaturityValue(uint128 _val) external {
