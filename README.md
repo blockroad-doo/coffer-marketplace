@@ -236,3 +236,7 @@ marketplace.acceptOwnership()             // step 2 of Ownable2Step
 - `sListingNonce(address, bondId)` is the per-bond listing nonce for a seller.
 - `sGlobalOfferNonce(address)` is the global offer nonce for a buyer, bumped by cancelAllOffers.
 - `sOfferNonce(address, bondId)` is the per-bond offer nonce for a buyer.
+
+## Licence
+
+The code in this repository is licensed under the Business Source License 1.1, see `LICENSE`. Until 2030-09-01 it may be copied, modified, redistributed and used for anything except production use, and production use needs a licence from Blockroad ltd. On that date the code becomes available under the MIT licence.
