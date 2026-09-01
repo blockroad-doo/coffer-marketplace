@@ -303,7 +303,7 @@ contract CofferMarketplaceTest is Test {
 
     // ───── DRY Helpers ─────
 
-    // Makers sign orders off-chain at the current on-chain nonce. There is no registration step, the
+    // Makers sign listings and offers off-chain at the current on-chain nonce. There is no registration step, the
     // taker fills directly and the contract verifies the signature at that moment. These helpers only
     // sign, they make no on-chain call.
 
@@ -430,7 +430,7 @@ contract CofferMarketplaceTest is Test {
     }
 
     function test_buySignedListing_firstFillAtNonceZero() public {
-        // The first order for a bond is signed and filled at nonce 0, with no prior on-chain action
+        // The first listing for a bond is signed and filled at nonce 0, with no prior on-chain action
         uint128 price = 1 ether;
         uint64 exp = uint64(block.timestamp + 1 days);
         assertEq(marketplace.sListingNonce(seller, bondId), 0);
@@ -861,8 +861,8 @@ contract CofferMarketplaceTest is Test {
 
     // ───── Fill events carry the consumed nonces ─────
 
-    // The fill events name the exact signed order: the consumed per-bond nonce and the global
-    // nonce the order was signed at. The indexer attributes fills to stored orders by these
+    // The fill events name the exact signed message: the consumed per-bond nonce and the global
+    // nonce it was signed at. The indexer attributes fills to stored rows by these
     // values, so they must be the consumed ones — not the post-bump ones, and not always zero.
     // Both nonces are advanced before the fill so a zero-defaulted emit cannot pass.
 

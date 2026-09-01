@@ -4,8 +4,8 @@ pragma solidity 0.8.34;
 // Durable regression for M-01 (offer-path maturity collapse) and its listing-path sibling.
 //
 // The bond maturity observed at signing time is bound into the EIP-712 Listing and Offer structs
-// and re-checked against the live bond maturity at fill. Collapsing a bond's maturity after an
-// order is signed therefore makes the fill revert with MaturityValueMismatch instead of letting the
+// and re-checked against the live bond maturity at fill. Collapsing a bond's maturity after a
+// listing or offer is signed therefore makes the fill revert with MaturityValueMismatch instead of letting the
 // counterparty overpay for a depleted bond. The signed value cannot be forged because it is part of
 // the digest, and a still-zero bond is rejected by the BondNotOutstanding check on the live value.
 //

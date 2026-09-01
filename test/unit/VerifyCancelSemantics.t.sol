@@ -7,11 +7,11 @@ import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 
 // Durable regression suite for audit finding L-03 (PoC F-04).
 // A fill requires the signed nonce to equal the current per-bond nonce, and every fill or per-bond
-// cancel advances that nonce by one. The integration rule is one open order per maker, bond, and side,
-// signed at the current on-chain nonce. These tests pin the documented cancel semantics on-chain:
+// cancel advances that nonce by one. The integration rule is one open listing or offer per maker, bond,
+// and side, signed at the current on-chain nonce. These tests pin the documented cancel semantics on-chain:
 // the batch cancel with a repeated bond id clears a pre-signed queue atomically without touching other
-// bonds, a single cancel arms the next pre-signed order (the footgun the docs warn about), and the
-// global cancel sweeps every order across all bonds.
+// bonds, a single cancel arms the next pre-signed listing (the footgun the docs warn about), and the
+// global cancel sweeps every listing across all bonds.
 contract VerifyCancelSemanticsTest is Test {
     CofferMarketplace public marketplace;
     MockBondNft public bondNft;
@@ -93,7 +93,7 @@ contract VerifyCancelSemanticsTest is Test {
         weth.approve(address(marketplace), type(uint256).max);
     }
 
-    // The seller pre-signed listings at nonce N and N+1 for bond A (violating the one-open-order rule)
+    // The seller pre-signed listings at nonce N and N+1 for bond A (violating the one-open rule)
     // and holds a normal listing on bond B. cancelListings([A, A]) advances bond A's nonce by two in
     // one transaction, killing the whole queue, while bond B's listing stays live and fillable.
     function test_batchCancelRepeatedBondId_clearsPresignedListingQueue() public {

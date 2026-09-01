@@ -147,7 +147,7 @@ contract CofferMarketplaceInvariantTest is Test {
         console2.log("warpTime:                 ", handler.callsWarpTime());
         console2.log("setNonOutstanding:        ", handler.callsSetNonOutstanding());
         console2.log("transferNft:              ", handler.callsTransferNft());
-        console2.log("--- Orders ---");
+        console2.log("--- Signed messages ---");
         console2.log("mintedBonds:              ", handler.getMintedBondCount());
         console2.log("listingsCreated:          ", handler.ghostTotalListingsCreated());
         console2.log("listingsPurchased:        ", handler.ghostTotalListingsPurchased());
@@ -167,7 +167,7 @@ contract CofferMarketplaceInvariantTest is Test {
         console2.log("BondNotOutstanding:       ", _buyRejected(CofferMarketplace.BondNotOutstanding.selector));
         console2.log("MaturityValueMismatch:    ", _buyRejected(CofferMarketplace.MaturityValueMismatch.selector));
         console2.log("replays after a fill:     ", handler.ghostBuyReplaysRejected());
-        console2.log("skipped, no order signed: ", handler.skippedBuyNoOrder());
+        console2.log("skipped, no listing signed: ", handler.skippedBuyNoListing());
         console2.log("skipped, buyer ETH short: ", handler.skippedBuyInsufficientEth());
         console2.log("--- Oracle: accept attempts rejected as predicted ---");
         console2.log("SameParty:                ", _acceptRejected(CofferMarketplace.SameParty.selector));
@@ -178,7 +178,7 @@ contract CofferMarketplaceInvariantTest is Test {
         console2.log("MaturityValueMismatch:    ", _acceptRejected(CofferMarketplace.MaturityValueMismatch.selector));
         console2.log("InsufficientPayment:      ", _acceptRejected(CofferMarketplace.InsufficientPayment.selector));
         console2.log("replays after a fill:     ", handler.ghostAcceptReplaysRejected());
-        console2.log("skipped, no order signed: ", handler.skippedAcceptNoOrder());
+        console2.log("skipped, no offer signed:  ", handler.skippedAcceptNoOffer());
     }
 
     function _buyRejected(bytes4 selector) internal view returns (uint256) {

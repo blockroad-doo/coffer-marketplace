@@ -522,7 +522,7 @@ contract VerifyErc1271SupportTest is Test {
         vm.prank(address(w));
         marketplace.cancelAllListings();
 
-        // The order signed at global nonce 0 is now revoked
+        // The listing signed at global nonce 0 is now revoked
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
         marketplace.buySignedListing{value: price}(wBond, address(w), price, mat, exp, 0, 0, sig);

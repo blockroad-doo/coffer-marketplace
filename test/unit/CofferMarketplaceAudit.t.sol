@@ -508,7 +508,7 @@ contract CofferMarketplaceAuditTest is Test {
     function test_cancelInvalidatesOldNonceListing() public {
         uint64 exp = uint64(block.timestamp + 1 days);
 
-        // Order signed at the current nonce 0
+        // Listing signed at the current nonce 0
         uint128 mat = coffer.maturityValues(bondId);
         bytes memory sigOld = _signListing(SELLER_PK, bondId, 1 ether, mat, exp, 0, 0);
 
@@ -517,12 +517,12 @@ contract CofferMarketplaceAuditTest is Test {
         marketplace.cancelListing(bondId);
         assertEq(marketplace.sListingNonce(seller, bondId), 1);
 
-        // The old order at nonce 0 is no longer fillable
+        // The old listing at nonce 0 is no longer fillable
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
         marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, mat, exp, 0, 0, sigOld);
 
-        // A fresh order signed at nonce 1 fills, paying the fee on the 3 ether profit
+        // A fresh listing signed at nonce 1 fills, paying the fee on the 3 ether profit
         uint128 mat2 = coffer.maturityValues(bondId);
         bytes memory sigNew = _signListing(SELLER_PK, bondId, 2 ether, mat2, exp, 1, 0);
         uint256 fee = _fee(3 ether);

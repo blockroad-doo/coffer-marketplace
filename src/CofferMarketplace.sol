@@ -15,8 +15,8 @@ import {IWETH} from "./interfaces/IWETH.sol";
 /// @title CofferMarketplace
 /// @author Coffer
 /// @notice Secondary marketplace for Coffer bond NFTs using EIP-712 signed listings and offers.
-/// @notice Makers sign listings and offers off-chain at no cost and the orders live in an off-chain
-///         order book. A taker fills an order on-chain with buySignedListing or acceptSignedOffer,
+/// @notice Makers sign listings and offers off-chain at no cost and the signed messages are stored
+///         off-chain. A taker fills a signed listing or offer on-chain with buySignedListing or acceptSignedOffer,
 ///         which verify the maker signature at that moment. Both EOA and ERC-1271 contract wallets,
 ///         such as Safe and ERC-4337 accounts, are supported. Makers cancel on-chain by bumping a
 ///         nonce, which is the only way to revoke an outstanding signature.
@@ -119,7 +119,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     /// @param price The listing price in wei
     /// @param fee The ETH fee collected by the marketplace
     /// @param nonce The per-bond listing nonce this fill consumed
-    /// @param globalNonce The seller's global listing nonce the order was signed at
+    /// @param globalNonce The seller's global listing nonce the listing was signed at
     event ListingPurchased(
         uint256 indexed bondId,
         address indexed buyer,
@@ -151,7 +151,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     /// @param wethAmount The WETH amount of the accepted offer
     /// @param fee The WETH fee collected by the marketplace
     /// @param nonce The per-bond offer nonce this fill consumed
-    /// @param globalNonce The buyer's global offer nonce the order was signed at
+    /// @param globalNonce The buyer's global offer nonce the offer was signed at
     event OfferAccepted(
         uint256 indexed bondId,
         address indexed buyer,

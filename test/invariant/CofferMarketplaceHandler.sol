@@ -146,9 +146,9 @@ contract CofferMarketplaceHandler is Test {
     address[] public actors;
     mapping(address => uint256) public actorPk;
 
-    // ──── Order snapshots (memory only, keeps the fill handlers under the stack limit) ────
+    // ──── Signed-message snapshots (memory only, keeps the fill handlers under the stack limit) ────
 
-    struct ListingOrder {
+    struct SignedListing {
         address seller;
         uint256 bondId;
         uint128 price;
@@ -158,7 +158,7 @@ contract CofferMarketplaceHandler is Test {
         uint256 globalNonce;
     }
 
-    struct OfferOrder {
+    struct SignedOffer {
         address buyer;
         uint256 bondId;
         uint128 amount;
@@ -179,16 +179,16 @@ contract CofferMarketplaceHandler is Test {
     // There is no on-chain registration. A maker signs off-chain at the CURRENT nonces, which the
     // handler models by recording the signed (nonce, globalNonce, maturity) triple at the
     // predicted values. A listing is "active" (fillable on-chain) iff:
-    //   ghostListingHasOrder[seller][bondId]                                          (signed)
+    //   ghostHasSignedListing[seller][bondId]                                          (signed)
     //   AND ghostListingSignedNonce[seller][bondId]       == ghostListingNonce[seller][bondId]
     //   AND ghostListingSignedGlobalNonce[seller][bondId] == ghostListingGlobalNonce[seller]
-    // The hasOrder flag is needed because the first order for a bond is signed at nonce 0. A
-    // stale order (nonces moved on) is kept on purpose: it is the replay-protection probe the
+    // The hasSigned flag is needed because the first listing for a bond is signed at nonce 0. A
+    // stale listing (nonces moved on) is kept on purpose: it is the replay-protection probe the
     // oracle predicts ListingRevoked for. Re-signing the same (seller, bond) overwrites the slot,
-    // which mirrors the README's one-open-order-per-bond restriction.
+    // which mirrors the README's one-open-per-bond restriction.
     mapping(address => mapping(uint256 => uint256)) public ghostListingNonce;
     mapping(address => uint256) public ghostListingGlobalNonce;
-    mapping(address => mapping(uint256 => bool)) public ghostListingHasOrder;
+    mapping(address => mapping(uint256 => bool)) public ghostHasSignedListing;
     mapping(address => mapping(uint256 => uint256)) public ghostListingSignedNonce;
     mapping(address => mapping(uint256 => uint256)) public ghostListingSignedGlobalNonce;
     mapping(address => mapping(uint256 => uint128)) public ghostListingSignedMaturity;
@@ -197,7 +197,7 @@ contract CofferMarketplaceHandler is Test {
 
     mapping(address => mapping(uint256 => uint256)) public ghostOfferNonce;
     mapping(address => uint256) public ghostOfferGlobalNonce;
-    mapping(address => mapping(uint256 => bool)) public ghostOfferHasOrder;
+    mapping(address => mapping(uint256 => bool)) public ghostHasSignedOffer;
     mapping(address => mapping(uint256 => uint256)) public ghostOfferSignedNonce;
     mapping(address => mapping(uint256 => uint256)) public ghostOfferSignedGlobalNonce;
     mapping(address => mapping(uint256 => uint128)) public ghostOfferSignedMaturity;
@@ -227,9 +227,9 @@ contract CofferMarketplaceHandler is Test {
     mapping(bytes4 => uint256) public ghostAcceptRejectedBySelector;
     uint256 public ghostBuyReplaysRejected;
     uint256 public ghostAcceptReplaysRejected;
-    uint256 public skippedBuyNoOrder;
+    uint256 public skippedBuyNoListing;
     uint256 public skippedBuyInsufficientEth;
-    uint256 public skippedAcceptNoOrder;
+    uint256 public skippedAcceptNoOffer;
     uint256 public skippedCancelAllListingsThrottled;
     uint256 public skippedCancelAllOffersThrottled;
 
@@ -319,7 +319,7 @@ contract CofferMarketplaceHandler is Test {
         uint64 expiration = uint64(block.timestamp + bound(expOffset, 1, 365 days));
 
         // The maker signs off-chain at the nonces the handler predicts to be current. No chain call.
-        ghostListingHasOrder[actor][bondId] = true;
+        ghostHasSignedListing[actor][bondId] = true;
         ghostListingSignedNonce[actor][bondId] = ghostListingNonce[actor][bondId];
         ghostListingSignedGlobalNonce[actor][bondId] = ghostListingGlobalNonce[actor];
         ghostListingSignedMaturity[actor][bondId] = coffer.maturityValues(bondId);
@@ -345,7 +345,7 @@ contract CofferMarketplaceHandler is Test {
         ++callsCancelAllListings;
         uint256 m = _mix(actorSeed);
         if (m % 4 != 0) {
-            // Throttle to about one call in four: unthrottled, cancelAll revokes nearly every order
+            // Throttle to about one call in four: unthrottled, cancelAll revokes nearly every signed message
             // before a fill, transfer or expiry can happen to it, and ListingRevoked drowns the rest.
             ++skippedCancelAllListingsThrottled;
             return;
@@ -362,12 +362,12 @@ contract CofferMarketplaceHandler is Test {
         ghostTotalListingsRevoked += revoked;
     }
 
-    function handlerBuySignedListing(uint256 buyerSeed, uint256 orderSeed, uint256 excessSeed) external {
+    function handlerBuySignedListing(uint256 buyerSeed, uint256 listingSeed, uint256 excessSeed) external {
         ++callsBuySignedListing;
-        ListingOrder memory o = _findListingOrder(orderSeed);
+        SignedListing memory o = _findSignedListing(listingSeed);
         if (o.seller == address(0)) {
             // Handler-universe limit: nothing has been signed yet.
-            ++skippedBuyNoOrder;
+            ++skippedBuyNoListing;
             return;
         }
 
@@ -401,8 +401,8 @@ contract CofferMarketplaceHandler is Test {
         uint64 expiration = uint64(block.timestamp + bound(expOffset, 1, 365 days));
 
         // The offerer signs off-chain at the predicted nonces. An offerer may sign against its own
-        // bond (the order book cannot stop that) and the accept path then rejects with SameParty.
-        ghostOfferHasOrder[buyer][bondId] = true;
+        // bond (the off-chain store cannot stop that) and the accept path then rejects with SameParty.
+        ghostHasSignedOffer[buyer][bondId] = true;
         ghostOfferSignedNonce[buyer][bondId] = ghostOfferNonce[buyer][bondId];
         ghostOfferSignedGlobalNonce[buyer][bondId] = ghostOfferGlobalNonce[buyer];
         ghostOfferSignedMaturity[buyer][bondId] = coffer.maturityValues(bondId);
@@ -444,12 +444,12 @@ contract CofferMarketplaceHandler is Test {
         ghostTotalOffersRevoked += revoked;
     }
 
-    function handlerAcceptSignedOffer(uint256 callerSeed, uint256 orderSeed) external {
+    function handlerAcceptSignedOffer(uint256 callerSeed, uint256 offerSeed) external {
         ++callsAcceptSignedOffer;
-        OfferOrder memory o = _findOfferOrder(orderSeed);
+        SignedOffer memory o = _findSignedOffer(offerSeed);
         if (o.buyer == address(0)) {
             // Handler-universe limit: nothing has been signed yet.
-            ++skippedAcceptNoOrder;
+            ++skippedAcceptNoOffer;
             return;
         }
 
@@ -516,7 +516,7 @@ contract CofferMarketplaceHandler is Test {
     /// @dev Attempt a fill of listing `o` by `buyer`. Either the oracle names the revert and the
     ///      call must revert with exactly that selector, or the call must succeed and settle
     ///      exactly, after which the identical replay must be rejected on the nonce check.
-    function _attemptBuy(ListingOrder memory o, address buyer, uint256 fee, uint256 total) internal {
+    function _attemptBuy(SignedListing memory o, address buyer, uint256 fee, uint256 total) internal {
         bytes memory sig =
             _signListing(actorPk[o.seller], o.bondId, o.price, o.maturity, o.expiration, o.nonce, o.globalNonce);
 
@@ -552,7 +552,7 @@ contract CofferMarketplaceHandler is Test {
     /// @dev Mirrors the require order of buySignedListing after dropping the checks the handler
     ///      universe cannot trigger (ZeroPrice, MarketplaceNotApproved, InvalidSignature,
     ///      InsufficientPayment). Returns 0 when the fill must succeed.
-    function _expectedBuyRevert(ListingOrder memory o, address buyer) internal view returns (bytes4) {
+    function _expectedBuyRevert(SignedListing memory o, address buyer) internal view returns (bytes4) {
         if (buyer == o.seller) return CofferMarketplace.SameParty.selector;
         if (o.nonce != ghostListingNonce[o.seller][o.bondId]) return CofferMarketplace.ListingRevoked.selector;
         if (o.globalNonce != ghostListingGlobalNonce[o.seller]) return CofferMarketplace.ListingRevoked.selector;
@@ -565,14 +565,14 @@ contract CofferMarketplaceHandler is Test {
         return bytes4(0);
     }
 
-    function _callBuy(ListingOrder memory o, uint256 value, bytes memory sig) internal {
+    function _callBuy(SignedListing memory o, uint256 value, bytes memory sig) internal {
         marketplace.buySignedListing{value: value}(
             o.bondId, o.seller, o.price, o.maturity, o.expiration, o.nonce, o.globalNonce, sig
         );
     }
 
     function _assertBuySettled(
-        ListingOrder memory o,
+        SignedListing memory o,
         address buyer,
         uint256 fee,
         uint256 sellerBefore,
@@ -588,7 +588,7 @@ contract CofferMarketplaceHandler is Test {
     }
 
     /// @dev Attempt an accept of offer `o` by `caller`. Same contract as _attemptBuy.
-    function _attemptAccept(OfferOrder memory o, address caller) internal {
+    function _attemptAccept(SignedOffer memory o, address caller) internal {
         uint256 fee = _fee(o.maturity, o.amount);
         bytes memory sig =
             _signOffer(actorPk[o.buyer], o.bondId, o.amount, o.maturity, o.expiration, o.nonce, o.globalNonce);
@@ -626,7 +626,7 @@ contract CofferMarketplaceHandler is Test {
     ///      universe cannot trigger (ZeroAmount, MarketplaceNotApproved, InvalidSignature).
     ///      `fee` is what the contract charges once the maturity checks pass, so it is only
     ///      relevant to the balance and allowance checks that follow them.
-    function _expectedAcceptRevert(OfferOrder memory o, address caller, uint256 fee) internal view returns (bytes4) {
+    function _expectedAcceptRevert(SignedOffer memory o, address caller, uint256 fee) internal view returns (bytes4) {
         if (caller == o.buyer) return CofferMarketplace.SameParty.selector;
         if (o.nonce != ghostOfferNonce[o.buyer][o.bondId]) return CofferMarketplace.OfferRevoked.selector;
         if (o.globalNonce != ghostOfferGlobalNonce[o.buyer]) return CofferMarketplace.OfferRevoked.selector;
@@ -646,14 +646,14 @@ contract CofferMarketplaceHandler is Test {
         return bytes4(0);
     }
 
-    function _callAccept(OfferOrder memory o, bytes memory sig) internal {
+    function _callAccept(SignedOffer memory o, bytes memory sig) internal {
         marketplace.acceptSignedOffer(
             o.bondId, o.buyer, o.amount, o.maturity, o.expiration, o.nonce, o.globalNonce, sig
         );
     }
 
     function _assertAcceptSettled(
-        OfferOrder memory o,
+        SignedOffer memory o,
         address caller,
         uint256 fee,
         uint256 callerBefore,
@@ -685,7 +685,7 @@ contract CofferMarketplaceHandler is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //                      Internal: Order lookup
+    //                      Internal: Snapshot lookup
     // ═══════════════════════════════════════════════════════════════
 
     /// @dev The fuzzer over-samples edge and dictionary values (0, 1, max, words seen in storage), so a
@@ -699,28 +699,28 @@ contract CofferMarketplaceHandler is Test {
     }
 
     function _isListingActive(address actor, uint256 bondId) internal view returns (bool) {
-        return ghostListingHasOrder[actor][bondId]
+        return ghostHasSignedListing[actor][bondId]
             && ghostListingSignedNonce[actor][bondId] == ghostListingNonce[actor][bondId]
             && ghostListingSignedGlobalNonce[actor][bondId] == ghostListingGlobalNonce[actor];
     }
 
     function _isOfferActive(address actor, uint256 bondId) internal view returns (bool) {
-        return ghostOfferHasOrder[actor][bondId]
+        return ghostHasSignedOffer[actor][bondId]
             && ghostOfferSignedNonce[actor][bondId] == ghostOfferNonce[actor][bondId]
             && ghostOfferSignedGlobalNonce[actor][bondId] == ghostOfferGlobalNonce[actor];
     }
 
     /// @dev A (seller, bond) pair holding a signed listing. Three seeds in four look for an ACTIVE
-    ///      order first (fills are the most informative events: settlement postconditions plus a
-    ///      replay probe); otherwise, or when none is active, any signed order qualifies, including
+    ///      listing first (fills are the most informative events: settlement postconditions plus a
+    ///      replay probe); otherwise, or when none is active, any signed listing qualifies, including
     ///      stale ones, which are the ListingRevoked probes. Empty struct (seller == 0) when nothing
     ///      has been signed yet.
-    function _findListingOrder(uint256 seed) internal view returns (ListingOrder memory o) {
+    function _findSignedListing(uint256 seed) internal view returns (SignedListing memory o) {
         uint256 m = _mix(seed);
-        (address seller, uint256 bondId) = _scanListingOrders(m / 4, m % 4 != 0);
-        if (seller == address(0) && m % 4 != 0) (seller, bondId) = _scanListingOrders(m / 4, false);
+        (address seller, uint256 bondId) = _scanSignedListings(m / 4, m % 4 != 0);
+        if (seller == address(0) && m % 4 != 0) (seller, bondId) = _scanSignedListings(m / 4, false);
         if (seller == address(0)) return o;
-        return ListingOrder({
+        return SignedListing({
             seller: seller,
             bondId: bondId,
             price: ghostListingPrice[seller][bondId],
@@ -731,26 +731,26 @@ contract CofferMarketplaceHandler is Test {
         });
     }
 
-    function _scanListingOrders(uint256 start, bool activeOnly) internal view returns (address, uint256) {
+    function _scanSignedListings(uint256 start, bool activeOnly) internal view returns (address, uint256) {
         uint256 numActors = actors.length;
         uint256 total = ghostMintedBondIds.length * numActors;
         for (uint256 i; i < total; ++i) {
             uint256 idx = (start + i) % total;
             uint256 bondId = ghostMintedBondIds[idx / numActors];
             address actor = actors[idx % numActors];
-            bool hit = activeOnly ? _isListingActive(actor, bondId) : ghostListingHasOrder[actor][bondId];
+            bool hit = activeOnly ? _isListingActive(actor, bondId) : ghostHasSignedListing[actor][bondId];
             if (hit) return (actor, bondId);
         }
         return (address(0), 0);
     }
 
-    /// @dev Offer-side twin of _findListingOrder.
-    function _findOfferOrder(uint256 seed) internal view returns (OfferOrder memory o) {
+    /// @dev Offer-side twin of _findSignedListing.
+    function _findSignedOffer(uint256 seed) internal view returns (SignedOffer memory o) {
         uint256 m = _mix(seed);
-        (address buyer, uint256 bondId) = _scanOfferOrders(m / 4, m % 4 != 0);
-        if (buyer == address(0) && m % 4 != 0) (buyer, bondId) = _scanOfferOrders(m / 4, false);
+        (address buyer, uint256 bondId) = _scanSignedOffers(m / 4, m % 4 != 0);
+        if (buyer == address(0) && m % 4 != 0) (buyer, bondId) = _scanSignedOffers(m / 4, false);
         if (buyer == address(0)) return o;
-        return OfferOrder({
+        return SignedOffer({
             buyer: buyer,
             bondId: bondId,
             amount: ghostOfferAmount[buyer][bondId],
@@ -761,21 +761,21 @@ contract CofferMarketplaceHandler is Test {
         });
     }
 
-    function _scanOfferOrders(uint256 start, bool activeOnly) internal view returns (address, uint256) {
+    function _scanSignedOffers(uint256 start, bool activeOnly) internal view returns (address, uint256) {
         uint256 numActors = actors.length;
         uint256 total = ghostMintedBondIds.length * numActors;
         for (uint256 i; i < total; ++i) {
             uint256 idx = (start + i) % total;
             uint256 bondId = ghostMintedBondIds[idx / numActors];
             address actor = actors[idx % numActors];
-            bool hit = activeOnly ? _isOfferActive(actor, bondId) : ghostOfferHasOrder[actor][bondId];
+            bool hit = activeOnly ? _isOfferActive(actor, bondId) : ghostHasSignedOffer[actor][bondId];
             if (hit) return (actor, bondId);
         }
         return (address(0), 0);
     }
 
     /// @dev Any minted bond is a legal cancel target (the contract bumps a nonce with nothing
-    ///      signed). Even seeds prefer one of the actor's active orders so the cancel-revokes-order
+    ///      signed). Even seeds prefer one of the actor's active listings so the cancel-revokes-listing
     ///      path stays frequent; every returned id is one the mirror invariants iterate.
     function _pickListingCancelTarget(address actor, uint256 seed) internal view returns (uint256) {
         uint256 len = ghostMintedBondIds.length;

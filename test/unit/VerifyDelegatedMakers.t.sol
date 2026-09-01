@@ -34,7 +34,7 @@ contract Mock7702Delegate {
 }
 
 /// @dev No isValidSignature at all and no fallback, so the ERC-1271 staticcall reverts. This is the
-///      delegate that kills every order its authoriser ever signed.
+///      delegate that kills every signed message its authoriser ever signed.
 contract Mock7702NoSigDelegate {
     function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
         return 0x150b7a02;
@@ -62,9 +62,9 @@ contract Mock7702NoReceiverDelegate {
 //
 // SignatureChecker branches on one fact, signer.code.length == 0 (SignatureChecker.sol:49). An
 // EIP-7702 delegation flips a plain EOA to the other side of that branch after the signature was
-// already made, and whether the old orders survive is entirely the delegate's decision. Gap B turns
-// down two cheaper designs, hiding every code-bearing maker's orders and refusing them at intake,
-// on the grounds that the usual delegate validates its owner's ECDSA signature and keeps the orders
+// already made, and whether the old signed messages survive is entirely the delegate's decision. Gap B
+// turns down two cheaper designs, hiding every code-bearing maker's rows and refusing them at intake,
+// on the grounds that the usual delegate validates its owner's ECDSA signature and keeps the rows
 // alive. The accepting-delegate tests below are what make that a result instead of a belief.
 //
 // Code is placed with vm.etch rather than the 7702 cheatcode for all but one test. vm.etch is
@@ -178,7 +178,7 @@ contract VerifyDelegatedMakersTest is Test {
     // ───── Row L11: the seller's address gains code after listing ─────
 
     // The signature was made by a key and is verified by code, and the code says yes. This is the
-    // case Gap B protects: hiding every code-bearing maker's orders would have killed this listing
+    // case Gap B protects: hiding every code-bearing maker's rows would have killed this listing
     // for no reason.
     function test_sellerGainsAcceptingDelegate_listingStillFills() public {
         uint64 exp = uint64(block.timestamp + 1 days);
@@ -195,7 +195,7 @@ contract VerifyDelegatedMakersTest is Test {
         assertEq(bondNft.ownerOf(bondA), buyer, "the ERC-1271 branch accepted the key signature");
     }
 
-    // The same delegation with a delegate that answers nothing. Every order this seller ever signed
+    // The same delegation with a delegate that answers nothing. Every signed message this seller ever signed
     // is dead while the delegation stands, and no event anywhere reports it, which is why Gap B's
     // cycle re-asks instead of waiting to be told.
     function test_sellerGainsSilentDelegate_listingReverts() public {

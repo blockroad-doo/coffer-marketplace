@@ -9,13 +9,13 @@ import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 //
 // A signature lives until its nonce moves. Four of the conditions that make a fill revert are
 // reversible, and the contract holds no memory of them: when the condition goes away the same
-// signature at the same nonce fills again. The order book depends on that, it hides those orders
+// signature at the same nonce fills again. The off-chain store depends on that, it hides those rows
 // at read time instead of retiring them, so these tests are what make "hide, never retire" a
 // property of the contract rather than a claim about it.
 //
 // The boundary test pins _validateTrade's inequality (CofferMarketplace.sol:498). The contract
 // allows block.timestamp == expiration; the backend's read gate uses expiration > now and hides
-// the order one second early, which is the safe direction and only safe if the contract really
+// the row one second early, which is the safe direction and only safe if the contract really
 // does fill at the boundary second.
 contract VerifyReversibleConditionsTest is Test {
     CofferMarketplace public marketplace;
@@ -32,7 +32,7 @@ contract VerifyReversibleConditionsTest is Test {
     address public mpOwner = makeAddr("mpOwner");
     address public feeRecipient = makeAddr("feeRecipient");
 
-    // Every bond in this file carries the mock's default maturity, and every order is priced at
+    // Every bond in this file carries the mock's default maturity, and every signed message is priced at
     // that same value, so the profit is zero and the fee is zero. These tests are about a
     // condition reversing, and a fee term would only add arithmetic to the assertions.
     uint128 constant MATURITY = 1 ether;
@@ -233,7 +233,7 @@ contract VerifyReversibleConditionsTest is Test {
 
     // _validateTrade allows block.timestamp <= expiration, so the expiration second is still a
     // fillable second and the one after it is not. Two bonds rather than one snapshot: the fill
-    // moves a nonce, so the two halves need separate orders to stay independent.
+    // moves a nonce, so the two halves need separate listings to stay independent.
     function test_expiryBoundary_fillsAtExpirationExactly() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonceA = marketplace.sListingNonce(seller, bondA);

@@ -1,6 +1,6 @@
 # Coffer Marketplace
 
-A **permissionless, non-custodial** secondary marketplace for trading [Coffer Bond NFTs](#what-is-a-coffer-bond-nft). Anyone can sign, fill, or cancel orders, and the contract owner's only powers are choosing the fee recipient and sweeping accrued fees. The marketplace never holds user funds or NFTs: assets stay in their owner's wallet until a fill settles through approvals, and the contract's balance carries only accrued protocol fees. Two trading mechanisms are supported: **EIP-712 signed listings** (seller signs off-chain, buyer executes on-chain) and **EIP-712 signed offers** (buyer signs off-chain, seller accepts on-chain). Orders are signed off-chain at no cost and live in an off-chain order book. The taker fills an order on-chain, where the signature is verified at that moment. Both EOA wallets and ERC-1271 contract wallets, such as Safe and ERC-4337 accounts, are supported.
+A **permissionless, non-custodial** secondary marketplace for trading [Coffer Bond NFTs](#what-is-a-coffer-bond-nft). Anyone can sign, fill, or cancel listings and offers, and the contract owner's only powers are choosing the fee recipient and sweeping accrued fees. The marketplace never holds user funds or NFTs: assets stay in their owner's wallet until a fill settles through approvals, and the contract's balance carries only accrued protocol fees. Two trading mechanisms are supported: **EIP-712 signed listings** (seller signs off-chain, buyer executes on-chain) and **EIP-712 signed offers** (buyer signs off-chain, seller accepts on-chain). Listings and offers are signed off-chain at no cost and live in an off-chain store. The taker fills a signed message on-chain, where the signature is verified at that moment. Both EOA wallets and ERC-1271 contract wallets, such as Safe and ERC-4337 accounts, are supported.
 
 Built with Solidity 0.8.34, [Foundry](https://book.getfoundry.sh/), and OpenZeppelin (`Ownable2Step`, `ReentrancyGuard`, `SafeERC20`, `Address`, `EIP712`, `SignatureChecker`).
 
@@ -59,15 +59,15 @@ A bond is considered **outstanding** while its `bondMaturityValue != 0`. The mar
 ### Listings (ETH)
 
 1. Seller signs an EIP-712 `Listing(bondId, price, maturityValue, expiration, nonce, globalNonce)` message with their wallet, using the current on-chain per-bond nonce. Signing costs nothing.
-2. The signed listing is posted to the off-chain order book. There is no on-chain registration step.
-3. Buyer calls `buySignedListing()` passing the listing parameters and the seller's signature. The contract rejects self-trades and a zero price, checks the signed per-bond and global nonces against the current ones, checks the seller still owns the bond and has the marketplace approved, checks the order is unexpired, verifies the signature against the seller, checks the bond is outstanding and that the signed `maturityValue` equals the bond's live maturity value (reverting `MaturityValueMismatch` otherwise), computes the profit-based fee (profit is the maturity value minus the price when positive, fee is `profit * FEE_BPS / BPS_DENOMINATOR`), requires the sent ETH to cover price plus fee, bumps the nonce to prevent replay, and executes the trade. The NFT goes to the buyer, the ETH price goes to the seller (with a WETH deposit and transfer fallback if the seller rejects ETH), the fee stays in the marketplace, and excess ETH is refunded to the buyer.
+2. The signed listing is posted to the off-chain store. There is no on-chain registration step.
+3. Buyer calls `buySignedListing()` passing the listing parameters and the seller's signature. The contract rejects self-trades and a zero price, checks the signed per-bond and global nonces against the current ones, checks the seller still owns the bond and has the marketplace approved, checks the listing is unexpired, verifies the signature against the seller, checks the bond is outstanding and that the signed `maturityValue` equals the bond's live maturity value (reverting `MaturityValueMismatch` otherwise), computes the profit-based fee (profit is the maturity value minus the price when positive, fee is `profit * FEE_BPS / BPS_DENOMINATOR`), requires the sent ETH to cover price plus fee, bumps the nonce to prevent replay, and executes the trade. The NFT goes to the buyer, the ETH price goes to the seller (with a WETH deposit and transfer fallback if the seller rejects ETH), the fee stays in the marketplace, and excess ETH is refunded to the buyer.
 
 The ETH payout forwards at most `SELLER_PAYOUT_GAS_LIMIT` (100,000) gas to the seller. A seller whose `receive` costs more than that, or burns gas deliberately, is paid in WETH through the fallback instead of failing the trade, and the bound keeps the fallback affordable at an ordinary gas limit. Because a seller can change what its `receive` does between a buyer's gas estimate and inclusion, buyers should submit fills with roughly 175,000 gas of headroom above the estimate, which covers the bounded payout plus the WETH fallback.
 
 ### Offers (WETH)
 
 1. Buyer signs an EIP-712 `Offer(bondId, wethAmount, maturityValue, expiration, nonce, globalNonce)` message at the current on-chain per-bond nonce. Signing costs nothing.
-2. The signed offer is posted to the off-chain order book. There is no on-chain registration step, and the contract does not check the WETH balance or allowance until acceptance. An order book that serves offers should check both before storing one.
+2. The signed offer is posted to the off-chain store. There is no on-chain registration step, and the contract does not check the WETH balance or allowance until acceptance. A store that serves offers should check both before storing one.
 3. Seller calls `acceptSignedOffer()` passing the offer parameters and the buyer's signature. The contract rejects self-trades and a zero amount, checks the signed per-bond and global nonces against the current ones, requires the caller to own the bond and have the marketplace approved, checks the offer is unexpired, verifies the signature against the buyer, checks the bond is outstanding and that the signed `maturityValue` equals the bond's live maturity value (reverting `MaturityValueMismatch` otherwise), computes the WETH fee at the constant rate, bumps the nonce to prevent replay, then verifies the buyer has sufficient WETH balance and allowance and executes the trade. The WETH amount goes from buyer to seller, the WETH fee goes from buyer to the marketplace, and the NFT transfers from seller to buyer.
 
 ### Fee Flow
@@ -91,8 +91,8 @@ The ETH payout forwards at most `SELLER_PAYOUT_GAS_LIMIT` (100,000) gas to the s
 
 ### Restrictions
 
-- **One open order per bond.** The nonce design supports exactly one live order per maker and bond on each side. Pre-signing several consecutive nonces for the same bond arms the next pre-signed order on every fill or cancel, so a cancel can sell at the next pre-signed price. The order book and signing client must enforce signing only at the current on-chain nonce. See Integration Considerations under Cancelling for the recovery procedure.
-- **Revocation is on-chain only.** An order is revoked by an on-chain cancel that bumps the nonce. Re-signing an order off-chain at the same nonce does not revoke the previous signature, so to withdraw an order or raise its price a maker cancels on-chain. Short expirations bound how long a stale signature can linger.
+- **One open listing or offer per bond.** The nonce design supports exactly one live signed message per maker and bond on each side. Pre-signing several consecutive nonces for the same bond arms the next pre-signed one on every fill or cancel, so a cancel can sell at the next pre-signed price. The store and signing client must enforce signing only at the current on-chain nonce. See Integration Considerations under Cancelling for the recovery procedure.
+- **Revocation is on-chain only.** A listing or offer is revoked by an on-chain cancel that bumps the nonce. Re-signing off-chain at the same nonce does not revoke the previous signature, so to withdraw a signed message or raise its price a maker cancels on-chain. Short expirations bound how long a stale signature can linger.
 
 ---
 
@@ -121,7 +121,7 @@ slither .
 
 ## Usage
 
-### Signing orders (EIP-712)
+### Signing listings and offers (EIP-712)
 
 The EIP-712 domain is `name = "CofferMarketplace"`, `version = "4"`, the chain id, and the marketplace address as `verifyingContract`. The contract exposes `eip712Domain()` (EIP-5267), so clients can read the domain at runtime instead of hardcoding it. The two type strings, verbatim from the contract:
 
@@ -130,7 +130,7 @@ Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uin
 Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)
 ```
 
-The signed `maturityValue` must equal the bond's live maturity (`getBondData(bondId)` returns it) at the moment of signing. It is re-checked on-chain at fill against the live value: if the bond's maturity changed after signing, for example because the holder partially withdrew, the fill reverts `MaturityValueMismatch`. This binds the price the maker committed to the bond value they signed against, so a counterparty cannot collapse the bond and still settle. The order book and signing client must snapshot the current maturity into the order and re-quote and re-sign whenever it changes.
+The signed `maturityValue` must equal the bond's live maturity (`getBondData(bondId)` returns it) at the moment of signing. It is re-checked on-chain at fill against the live value: if the bond's maturity changed after signing, for example because the holder partially withdrew, the fill reverts `MaturityValueMismatch`. This binds the price the maker committed to the bond value they signed against, so a counterparty cannot collapse the bond and still settle. The store and signing client must snapshot the current maturity into the signed message and re-quote and re-sign whenever it changes.
 
 ### Assessing a bond before quoting a price
 
@@ -146,7 +146,7 @@ Read `validatorDefaulted` from `sValidatorConditions()` **by field name**, using
 Three consequences worth pricing in:
 
 - Claims in a defaulted Coffer are first come first served. If the balance and the incoming stake cover less than the total owed, the earliest claimants are paid in full and the last are not.
-- A partial claim does not fail. It lowers the bond's maturity value by the amount paid and leaves the bond live for the remainder, which also invalidates any order signed against the old value. In a defaulted Coffer this is routine rather than rare, so re-quote all of a Coffer's bonds when `ValidatorDefaulted` fires and keep expirations short on distressed listings.
+- A partial claim does not fail. It lowers the bond's maturity value by the amount paid and leaves the bond live for the remainder, which also invalidates any listing or offer signed against the old value. In a defaulted Coffer this is routine rather than rare, so re-quote all of a Coffer's bonds when `ValidatorDefaulted` fires and keep expirations short on distressed listings.
 - Maturity dates stop mattering after a default. An immature bond in a defaulted Coffer claims exactly like a matured one.
 
 A matured bond stays outstanding until someone settles it. The holder pulls the payment through `holderRedeemBondOrDefault`, and when the holder never claims, `validatorRedeemBonds` is the validator's only way to settle the bond without them, because an unclaimed matured bond keeps `outstandingBonds` above zero and blocks every restricted parameter change on the Coffer. A listed bond past its maturity can therefore be zeroed by the validator at any moment, so treat it like a distressed listing and keep its expiration short.
@@ -156,7 +156,7 @@ A matured bond stays outstanding until someone settles it. The holder pulls the 
 ```
 1. Seller: cofferBondNft.setApprovalForAll(marketplace, true)
 2. Seller: signTypedData(marketplace, Listing(bondId, price, maturityValue, expiration, nonce, globalNonce))   (nonce = current sListingNonce, maturityValue = current getBondData(bondId) maturity)
-3. Seller: post the signed listing to the order book (off-chain, no gas)
+3. Seller: post the signed listing to the store (off-chain, no gas)
 4. Buyer:  marketplace.buySignedListing(bondId, seller, price, maturityValue, expiration, nonce, globalNonce, sig)   {value: price + buyFee}
 ```
 
@@ -165,7 +165,7 @@ A matured bond stays outstanding until someone settles it. The holder pulls the 
 ```
 1. Buyer:  weth.approve(marketplace, offerAmount + expectedFee)
 2. Buyer:  signTypedData(marketplace, Offer(bondId, wethAmount, maturityValue, expiration, nonce, globalNonce))   (nonce = current sOfferNonce, maturityValue = current getBondData(bondId) maturity)
-3. Buyer:  post the signed offer to the order book (off-chain, no gas)
+3. Buyer:  post the signed offer to the store (off-chain, no gas)
 4. Seller: cofferBondNft.setApprovalForAll(marketplace, true)
 5. Seller: marketplace.acceptSignedOffer(bondId, buyer, wethAmount, maturityValue, expiration, nonce, globalNonce, sig)
 ```
@@ -189,33 +189,33 @@ marketplace.cancelAllOffers()             (cancel all offers)
 
 A fill requires the signed nonce to equal the current on-chain nonce, and every fill or per-bond cancel advances that nonce by exactly one. This gives the integration layer a small set of hard rules.
 
-- **Signing rule.** The client signs only at the current on-chain nonce (`sListingNonce(maker, bondId)` or `sOfferNonce(maker, bondId)`) and keeps at most one open signed order per maker, bond, and side. Never let a maker sign nonce N+1 while their nonce N order is still open. Pre-signing the next nonce means a later cancel or fill arms it at its signed price.
-- **Order book rule.** Key orders by (maker, bondId, side, nonce), not by signature bytes, since ERC-1271 contract wallets make signature bytes non-unique. When a second open order arrives for the same maker and bond, reject it or replace the stored one. Re-signing at the same nonce replaces the order in the book but does not revoke the old signature on-chain, both verify, so raising a price requires an on-chain cancel first.
+- **Signing rule.** The client signs only at the current on-chain nonce (`sListingNonce(maker, bondId)` or `sOfferNonce(maker, bondId)`) and keeps at most one open signed message per maker, bond, and side. Never let a maker sign nonce N+1 while their nonce N signature is still open. Pre-signing the next nonce means a later cancel or fill arms it at its signed price.
+- **Store rule.** Key stored signed messages by (maker, bondId, side, nonce), not by signature bytes, since ERC-1271 contract wallets make signature bytes non-unique. When a second open one arrives for the same maker and bond, reject it or replace the stored row. Re-signing at the same nonce replaces the stored row but does not revoke the old signature on-chain, both verify, so raising a price requires an on-chain cancel first.
 - **Independence of bonds.** Per-bond cancels touch only that bond. A maker with offers on bond A and bond B cancels A with `cancelOffer(A)` and the offer on B stays live. `cancelAllOffers()` kills every offer on every bond for that maker, use it only as the deliberate sweep. Listings behave the same way.
-- **Recovery from a pre-signed queue.** If a maker violated the signing rule and pre-signed k consecutive nonces for one bond, a single cancel only advances the nonce by one and arms the next pre-signed order. The maker clears the whole queue in one transaction by repeating the bond id, for example `cancelListings([A, A])` for k = 2, or the bond id repeated k times in general. The nonce advances past every pre-signed value atomically, with no window in which the next order is fillable, and no other bond is touched. `cancelOffers` works the same for offers.
-- **Re-sync after every cancel or fill.** The order book re-reads `sListingNonce`, `sGlobalListingNonce`, `sOfferNonce`, and `sGlobalOfferNonce`, or indexes the cancel and trade events, and drops every stored order whose signed nonces no longer match the chain, and the client refreshes what it shows as open.
+- **Recovery from a pre-signed queue.** If a maker violated the signing rule and pre-signed k consecutive nonces for one bond, a single cancel only advances the nonce by one and arms the next pre-signed listing. The maker clears the whole queue in one transaction by repeating the bond id, for example `cancelListings([A, A])` for k = 2, or the bond id repeated k times in general. The nonce advances past every pre-signed value atomically, with no window in which the next one is fillable, and no other bond is touched. `cancelOffers` works the same for offers.
+- **Re-sync after every cancel or fill.** The store re-reads `sListingNonce`, `sGlobalListingNonce`, `sOfferNonce`, and `sGlobalOfferNonce`, or indexes the cancel and trade events, and drops every stored signed message whose nonces no longer match the chain, and the client refreshes what it shows as open.
 
 ### Maker-controlled code and the taker's gas
 
 A fill runs code the maker controls, at three points. The ERC-1271 `isValidSignature` check runs on a contract-wallet maker on both paths, before anything moves, and receives all the gas remaining at that point. `onERC721Received` runs on a contract offerer when an offer is accepted, after the WETH has already moved, and also receives all the gas remaining. The seller's `receive` on a listing payout is the one bounded case, capped at `SELLER_PAYOUT_GAS_LIMIT` with the WETH fallback behind it, see Listings (ETH) under How the Marketplace Works.
 
-The two unbounded points mean an order can be written so that every attempt to fill it consumes the taker's whole gas limit and then fails, leaving the order live for the next taker. What such an order cannot do is settle on terms the taker did not agree to. Signature verification precedes every transfer, the digest binds every field of the order, and every failure path reverts the entire fill including the nonce bump. The exposure is gas, and its ceiling is the limit the taker submitted.
+The two unbounded points mean a listing or offer can be written so that every attempt to fill it consumes the taker's whole gas limit and then fails, leaving it live for the next taker. What such a signed message cannot do is settle on terms the taker did not agree to. Signature verification precedes every transfer, the digest binds every field of the signed message, and every failure path reverts the entire fill including the nonce bump. The exposure is gas, and its ceiling is the limit the taker submitted.
 
 The two sides are not symmetric. A listing's maker owns the bond and has approved the marketplace, both checked before their code runs. An offer's maker is checked for nothing beforehand by the contract, and their WETH balance and allowance are not read until the transfers, so an offerer holding no WETH and granting no allowance still runs code inside a seller's accept. Posting an offer costs nothing and keeping it alive costs nothing.
 
-The contract screens nothing before a fill. Whether an order book checks a maker's code before serving an order is up to that order book, and the marketplace is permissionless, so an order that reached a taker some other way carries no screening at all. The taker's client carries the protection.
+The contract screens nothing before a fill. Whether a store checks a maker's code before serving a listing or offer is up to that store, and the marketplace is permissionless, so a signed message that reached a taker some other way carries no screening at all. The taker's client carries the protection.
 
 - **The submitted gas limit is the maximum loss.** Compute it rather than passing a wallet default through, and do not raise it blindly when a fill fails. Listings (ETH) gives the headroom a fill needs above its estimate.
 - **Prefer private submission.** A maker can behave during the estimate and misbehave at inclusion, and a public mempool is what tells them when to switch.
 
-One limit is worth stating plainly. A maker's code can behave during a simulation and switch at inclusion, by reading the gas price, the gas left, the transaction origin or its own state, and a fill that reverts emits nothing, so no order book learns of it. That case is what the taker's gas limit and private submission are for.
+One limit is worth stating plainly. A maker's code can behave during a simulation and switch at inclusion, by reading the gas price, the gas left, the transaction origin or its own state, and a fill that reverts emits nothing, so no store learns of it. That case is what the taker's gas limit and private submission are for.
 
 ### Risk Factors
 
-- **Pre-signed nonce queues.** Orders signed ahead of the current on-chain nonce arm one by one as fills and cancels advance it. The recovery procedure under Integration Considerations clears the whole queue in one transaction.
-- **Stale signatures.** A signed order stays fillable until it expires or the maker cancels on-chain, and re-signing off-chain does not revoke it. Short expirations bound how long a stale signature can linger.
-- **Bond invalidation after signing.** A bond's maturity value can change after an order is signed, through a holder redemption after maturity, a validator redemption before or after maturity, or a claim in a defaulted Coffer, which is the one path that can lower the value without zeroing it. Fills against the old value revert `MaturityValueMismatch`, or `BondNotOutstanding` once the value is zeroed, and the order book must re-quote against the live value and the maker must re-sign.
-- **Maker-controlled code in a fill.** A contract wallet's signature check and a contract offerer's receiver hook both run with the taker's gas. An order can be written so that every fill attempt burns that gas and then fails, leaving the order live. No funds move and no fill settles on terms the taker did not agree to. See Maker-controlled code and the taker's gas.
+- **Pre-signed nonce queues.** Listings and offers signed ahead of the current on-chain nonce arm one by one as fills and cancels advance it. The recovery procedure under Integration Considerations clears the whole queue in one transaction.
+- **Stale signatures.** A signed listing or offer stays fillable until it expires or the maker cancels on-chain, and re-signing off-chain does not revoke it. Short expirations bound how long a stale signature can linger.
+- **Bond invalidation after signing.** A bond's maturity value can change after a listing or offer is signed, through a holder redemption after maturity, a validator redemption before or after maturity, or a claim in a defaulted Coffer, which is the one path that can lower the value without zeroing it. Fills against the old value revert `MaturityValueMismatch`, or `BondNotOutstanding` once the value is zeroed, and the store must re-quote against the live value and the maker must re-sign.
+- **Maker-controlled code in a fill.** A contract wallet's signature check and a contract offerer's receiver hook both run with the taker's gas. A listing or offer can be written so that every fill attempt burns that gas and then fails, leaving it live. No funds move and no fill settles on terms the taker did not agree to. See Maker-controlled code and the taker's gas.
 - **Default and impairment.** Equal maturity values do not mean equal assets. A default lands when a matured bond cannot be paid, either through `declareDefault` or atomically through the holder's `holderRedeemBondOrDefault`, and while it stands a defaulted Coffer pays first come first served from whatever balance and swept stake it has, so late claimants can be paid partially or not at all. After every bond is settled at full value the validator can clear the default with `clearDefault()` and resume operations. Check `validatorDefaulted` and the Coffer balance before quoting, see Assessing a bond before quoting a price.
 
 ### Admin Operations

@@ -8,7 +8,7 @@ import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 // Durable regression suite for audit finding L-04.
 // The buy path now performs the same isApprovedForAll fast-fail as the accept path, and both trade
 // functions run the cheap local checks and the on-chain ownership and approval checks before signature
-// verification. A revoked-approval order therefore reverts MarketplaceNotApproved early, with a named
+// verification. A revoked-approval listing therefore reverts MarketplaceNotApproved early, with a named
 // error, before any signature work, rather than reverting late inside safeTransferFrom.
 contract VerifyApprovalFastFailTest is Test {
     CofferMarketplace public marketplace;
