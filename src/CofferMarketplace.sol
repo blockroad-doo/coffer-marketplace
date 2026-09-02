@@ -485,6 +485,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     function _getBondMaturity(uint256 _bondId) internal view returns (uint128 maturityValue) {
         // slither-disable-next-line calls-loop
         address cofferAddr = ICofferBondNft(I_COFFER_BOND_NFT).cofferOf(_bondId);
+        // forge-lint: disable-next-item(unused-return) only maturityValue is needed from the tuple
         // slither-disable-next-line unused-return,calls-loop
         (maturityValue,,) = ICoffer(cofferAddr).sHolderConditions(_bondId);
     }
@@ -567,9 +568,11 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         // buyer's onERC721Received, say) can place its own log at a lower log index than the sale.
         emit OfferAccepted(_bondId, _buyer, msg.sender, _wethAmount, _fee, _nonce, _globalNonce);
 
+        // forge-lint: disable-next-item(arbitrary-send-erc20) _buyer is the recovered EIP-712 offer signer
         // slither-disable-next-line arbitrary-send-erc20
         IERC20(I_WETH).safeTransferFrom(_buyer, msg.sender, _wethAmount);
         if (_fee > 0) {
+            // forge-lint: disable-next-item(arbitrary-send-erc20) same signer, fee leg
             // slither-disable-next-line arbitrary-send-erc20
             IERC20(I_WETH).safeTransferFrom(_buyer, address(this), _fee);
         }

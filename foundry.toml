@@ -48,7 +48,10 @@ no_match_path = "test/{integration,audit-poc}/*"
 [profile.ci]
 
 [lint]
-exclude_lints = ["mixed-case-function"]
-# Disposable audit PoC tree, excluded from linting. The glob needs the file component: a trailing
-# "**" matches no files and a "./" prefix matches nothing at all.
-ignore = ["test/audit-poc/**/*.sol"]
+# The post-build lint (forge 1.8) gates the CI Build job through --deny warnings, so it is scoped
+# to src, the same scope as slither.config.json filter_paths. The glob needs the file component:
+# a trailing "**" matches no files and a "./" prefix matches nothing at all.
+ignore = ["test/**/*.sol", "script/**/*.sol"]
+# reentrancy-events mirrors the slither.config.json triage: cancelListings and cancelOffers emit
+# after a loop of storage writes, there is no external call in either.
+exclude_lints = ["mixed-case-function", "reentrancy-events"]
