@@ -14,7 +14,7 @@ import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 // property of the contract rather than a claim about it.
 //
 // The boundary test pins _validateTrade's inequality (CofferMarketplace.sol:498). The contract
-// allows block.timestamp == expiration; the backend's read gate uses expiration > now and hides
+// allows block.timestamp == expiration; an off-chain store that serves only expiration > now hides
 // the row one second early, which is the safe direction and only safe if the contract really
 // does fill at the boundary second.
 contract VerifyReversibleConditionsTest is Test {

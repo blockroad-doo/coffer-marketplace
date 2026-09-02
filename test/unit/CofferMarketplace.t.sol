@@ -38,7 +38,7 @@ contract MockBondNft {
     }
 
     /// @dev The real Coffer deletes the bond record and burns the NFT in one call
-    ///      (coffer-smart-contracts/src/Coffer.sol:695-696). Without a burn here no test can
+    ///      (coffer-smart-contracts/src/Coffer.sol:699-700). Without a burn here no test can
     ///      reach the burn path at all.
     function burn(uint256 tokenId) external {
         delete _owners[tokenId];

@@ -11,7 +11,7 @@ import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 // Both rows say a burned bond fails inside ownerOf with ERC721NonexistentToken, before the
 // marketplace reaches its own BondNotOutstanding check, and that BondNotOutstanding is therefore
 // unreachable against the real Coffer. The reason is that the real Coffer deletes the holder record
-// and burns the NFT in one call (coffer-smart-contracts/src/Coffer.sol:695-696), so the state where
+// and burns the NFT in one call (coffer-smart-contracts/src/Coffer.sol:699-700), so the state where
 // the maturity reads zero while the token still exists is never produced.
 //
 // Two tests take the burn path on each side, and a third produces the unreachable state by hand to

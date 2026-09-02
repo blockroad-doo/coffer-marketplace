@@ -11,8 +11,8 @@ import {CofferMarketplace} from "../src/CofferMarketplace.sol";
 ///      variables that the forge child process never sees; `set -a` auto-exports them), then
 ///      `forge script script/DeployCofferMarketplace.s.sol --broadcast --rpc-url $HOODI_RPC_URL`.
 ///      After a successful broadcast, manually copy the printed
-///      `HOODI_COFFER_MARKETPLACE_ADDRESS=...` line into `../.env` for downstream consumers
-///      (backend/frontend/smart-contracts repo). The address is also recorded in `broadcast/`.
+///      `HOODI_COFFER_MARKETPLACE_ADDRESS=...` line into `../.env` for downstream consumers,
+///      the other repositories that hold the address. The address is also recorded in `broadcast/`.
 ///      Requires HOODI_MARKETPLACE_OWNER and HOODI_MARKETPLACE_FEE_RECIPIENT to be set and
 ///      non-zero; the script reverts otherwise (no fallback keys). For mainnet, introduce a
 ///      MAINNET_* key set and adjust names accordingly.
