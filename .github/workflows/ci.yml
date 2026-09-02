@@ -17,7 +17,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: v1.7.1
+          version: v1.8.1
           cache: false
 
       - name: Set up Node
@@ -43,9 +43,11 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: v1.7.1
+          version: v1.8.1
           cache: false
 
+      # the post-build lint gates this job through --deny warnings. Its scope (src only) and its
+      # exclusions live in foundry.toml [lint]
       - name: Build
         run: forge build --sizes --deny warnings
 
@@ -60,7 +62,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: v1.7.1
+          version: v1.8.1
           cache: false
 
       - name: Build for Slither
@@ -82,7 +84,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: v1.7.1
+          version: v1.8.1
           cache: false
 
       - name: Set weekly fuzz seed
@@ -92,7 +94,7 @@ jobs:
           )" >> $GITHUB_ENV
 
       - name: Build
-        run: forge build
+        run: forge build --no-lint
 
       - name: Run local tests
         run: >
@@ -118,7 +120,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: v1.7.1
+          version: v1.8.1
           cache: false
 
       # The invariant fuzzer's RNG is seeded from fuzz.seed (there is no invariant.seed), so the
@@ -130,7 +132,7 @@ jobs:
           )" >> $GITHUB_ENV
 
       - name: Build
-        run: forge build
+        run: forge build --no-lint
 
       # A misspelled or missing profile only warns on stderr, falls back to the default profile
       # (which excludes test/invariant), reports "No tests match" and exits 0. Fail loudly instead.
