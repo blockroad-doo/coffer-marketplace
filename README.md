@@ -239,4 +239,4 @@ marketplace.acceptOwnership()             // step 2 of Ownable2Step
 
 ## Licence
 
-The code in this repository is licensed under the Business Source License 1.1, see `LICENSE`. Until 2030-09-01 it may be copied, modified, redistributed and used for anything except production use, and production use needs a licence from Blockroad ltd. On that date the code becomes available under the MIT licence.
+The code in this repository is licensed under the Business Source License 1.1, see `LICENSE`. Until 2030-09-01 it may be copied, modified, redistributed and used for anything except production use, and production use needs a licence from Blockroad d.o.o. On that date the code becomes available under the MIT licence.

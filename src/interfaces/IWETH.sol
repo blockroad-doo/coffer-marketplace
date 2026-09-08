@@ -2,7 +2,7 @@
 pragma solidity 0.8.34;
 
 /// @title IWETH
-/// @author Coffer
+/// @author Blockroad d.o.o.
 /// @notice Minimal ERC-20 interface for WETH interactions
 interface IWETH {
     /// @notice Transfer tokens from one address to another using an allowance

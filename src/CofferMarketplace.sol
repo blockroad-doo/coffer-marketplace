@@ -12,18 +12,19 @@ import {ICofferBondNft} from "./interfaces/ICofferBondNft.sol";
 import {ICoffer} from "./interfaces/ICoffer.sol";
 import {IWETH} from "./interfaces/IWETH.sol";
 
-/// @title CofferMarketplace
-/// @author Coffer
-/// @notice Secondary marketplace for Coffer bond NFTs using EIP-712 signed listings and offers.
-/// @notice Makers sign listings and offers off-chain at no cost and the signed messages are stored
-///         off-chain. A taker fills a signed listing or offer on-chain with buySignedListing or acceptSignedOffer,
-///         which verify the maker signature at that moment. Both EOA and ERC-1271 contract wallets,
-///         such as Safe and ERC-4337 accounts, are supported. Makers cancel on-chain by bumping a
-///         nonce, which is the only way to revoke an outstanding signature.
-/// @notice A fixed fee of FEE_BPS (900 basis points, 9%) of the buyer's profit, the maturity value
-///         minus the price when positive, is charged only on a completed trade: on buySignedListing
-///         paid in ETH by the buyer on top of the price, on acceptSignedOffer paid in WETH by the
-///         offerer on top of the offer amount. See the Fee Flow section of the README.
+/**
+ * @title CofferMarketplace
+ * @author Blockroad d.o.o.
+ * @notice Secondary marketplace for Coffer bond NFTs, traded through EIP-712 signed listings and offers
+ * @notice Makers sign listings and offers off-chain at no cost and takers fill them on-chain, a listing with
+ * buySignedListing paid in ETH and an offer with acceptSignedOffer paid in WETH
+ * @notice Verifies the maker signature at fill time for EOA makers and for ERC-1271 contract wallets such as
+ * Safe and ERC-4337 accounts
+ * @notice Makers revoke an outstanding signature on-chain only, by bumping a per-bond or a global nonce
+ * @notice Charges a fixed fee of FEE_BPS (900 basis points, 9%) of the buyer's profit, the maturity value minus
+ * the price when positive, on completed trades only, paid on top by the buyer in ETH or by the offerer in WETH
+ * @notice Pays a seller that cannot receive ETH in WETH instead, so a fill never fails on the payout
+ */
 contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
 
