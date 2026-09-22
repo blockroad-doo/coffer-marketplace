@@ -92,7 +92,7 @@ contract VerifySellerPayoutGasCapTest is Test {
     uint64 internal expiration;
 
     bytes32 constant LISTING_TYPEHASH = keccak256(
-        "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+        "Listing(address seller,uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -115,16 +115,17 @@ contract VerifySellerPayoutGasCapTest is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("4")),
+                keccak256(bytes("5")),
                 block.chainid,
                 address(marketplace)
             )
         );
     }
 
-    function _signListing(uint256 _pk, uint256 _bondId) internal view returns (bytes memory) {
-        bytes32 structHash =
-            keccak256(abi.encode(LISTING_TYPEHASH, _bondId, PRICE, MATURITY, expiration, uint256(0), uint256(0)));
+    function _signListing(uint256 _pk, address _seller, uint256 _bondId) internal view returns (bytes memory) {
+        bytes32 structHash = keccak256(
+            abi.encode(LISTING_TYPEHASH, _seller, _bondId, PRICE, MATURITY, expiration, uint256(0), uint256(0))
+        );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(_pk, digest);
         return abi.encodePacked(r, s, v);
@@ -156,7 +157,7 @@ contract VerifySellerPayoutGasCapTest is Test {
         );
         vm.prank(buyer);
         (ok,) = address(marketplace).call{gas: _gasLimit, value: _value}(data);
-        used = vm.lastCallGas().gasTotalUsed;
+        used = vm.lastFrameGas().gasTotalUsed;
     }
 
     /// @notice A gas-burning seller no longer starves the WETH fallback: the fill settles at an
@@ -233,7 +234,7 @@ contract VerifySellerPayoutGasCapTest is Test {
         uint256 bondId = bondNft.mintTo(seller, address(coffer));
         vm.prank(seller);
         bondNft.setApprovalForAll(address(marketplace), true);
-        bytes memory sig = _signListing(SELLER_PK, bondId);
+        bytes memory sig = _signListing(SELLER_PK, seller, bondId);
 
         (bool ok,) = _fill(seller, bondId, sig, 500_000);
 

@@ -78,14 +78,12 @@ The ETH payout forwards at most `SELLER_PAYOUT_GAS_LIMIT` (100,000) gas to the s
 - Both claim functions are `onlyOwner` and send to `sFeeRecipient`.
 - Both claim functions sweep the full balance, not a tracked ledger, so any ETH or WETH sent to the contract outside the fee flow is also paid to the fee recipient. Per-trade fees are auditable from the `ListingPurchased` and `OfferAccepted` events.
 
-### Protections (enforced by code)
+### Protections
 
-- **EIP-712 signature integrity.** Every field in a listing or offer is cryptographically bound to the signer. Changing any parameter invalidates the signature, which eliminates the need for `_expectedPrice` and `_expectedAmount` front-running guards. Signatures are verified with OpenZeppelin `SignatureChecker`, so both EOA signatures and ERC-1271 contract-wallet signatures (Safe, ERC-4337) are accepted. Contract-wallet validity is checked at fill time, so a wallet that revokes its authorization after signing correctly fails at the fill.
+- **EIP-712 signature integrity.** Every field in a listing or offer is cryptographically bound to the signer. Changing any parameter invalidates the signature, which eliminates the need for `_expectedPrice` and `_expectedAmount` front-running guards. Signatures are verified with OpenZeppelin `SignatureChecker`, so both EOA signatures and ERC-1271 contract-wallet signatures (Safe, ERC-4337) are accepted. Contract-wallet validity is checked at fill time, so a wallet that revokes its authorization after signing correctly fails at the fill. The maker's address is the first field of both structs, so a signature verifies for the account it names and no other, a contract wallet that validates against the same key as an EOA included.
 - **Maturity value binding.** The signed `maturityValue` is re-checked against the bond's live maturity value at fill. If the bond changed after signing, the fill reverts `MaturityValueMismatch`. This binds the committed price to the bond value the maker signed against.
-- **Nonce-based replay protection.** Each listing and offer is signed at the current per-bond per-user nonce. After a successful trade, the nonce is auto-incremented, which prevents the same signature from being reused. Cancellation works by bumping the nonce, which renders all previous signatures for that bond invalid.
+- **Nonce-based replay protection.** Each listing and offer is signed at the current per-bond per-user nonce. After a successful trade, the maker's nonce for that bond and side is auto-incremented, which prevents the same signature from being reused. Cancellation works by bumping the nonce, which renders all previous signatures for that bond invalid.
 - **Two-tier nonce system.** Per-bond nonces handle single and batch cancellation. A global nonce per user enables cancel-all, where one transaction invalidates every listing or offer for that user.
-- **CEI pattern.** The per-bond nonce is bumped before any external token or NFT transfers.
-- **ReentrancyGuard.** Applied to `buySignedListing` and `acceptSignedOffer`.
 - **Bond outstanding check.** Every trade verifies the bond's maturity value is non-zero.
 - **Two-step ownership transfer.** `Ownable2Step` prevents accidental transfer to the wrong address. Renouncing ownership is permanently disabled, so the owner can never be set to the zero address, which would otherwise lock accrued fees in a non-upgradeable contract.
 
@@ -123,11 +121,11 @@ slither .
 
 ### Signing listings and offers (EIP-712)
 
-The EIP-712 domain is `name = "CofferMarketplace"`, `version = "4"`, the chain id, and the marketplace address as `verifyingContract`. The contract exposes `eip712Domain()` (EIP-5267), so clients can read the domain at runtime instead of hardcoding it. The two type strings, verbatim from the contract:
+The EIP-712 domain is `name = "CofferMarketplace"`, `version = "5"`, the chain id, and the marketplace address as `verifyingContract`. The contract exposes `eip712Domain()` (EIP-5267), so clients can read the domain at runtime instead of hardcoding it. The two type strings, verbatim from the contract:
 
 ```
-Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)
-Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)
+Listing(address seller,uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)
+Offer(address buyer,uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)
 ```
 
 The signed `maturityValue` must equal the bond's live maturity (`getBondData(bondId)` returns it) at the moment of signing. It is re-checked on-chain at fill against the live value: if the bond's maturity changed after signing, for example because the holder partially withdrew, the fill reverts `MaturityValueMismatch`. This binds the price the maker committed to the bond value they signed against, so a counterparty cannot collapse the bond and still settle. The store and signing client must snapshot the current maturity into the signed message and re-quote and re-sign whenever it changes.
@@ -213,7 +211,7 @@ One limit is worth stating plainly. A maker's code can behave during a simulatio
 ### Risk Factors
 
 - **Pre-signed nonce queues.** Listings and offers signed ahead of the current on-chain nonce arm one by one as fills and cancels advance it. The recovery procedure under Integration Considerations clears the whole queue in one transaction.
-- **Stale signatures.** A signed listing or offer stays fillable until it expires or the maker cancels on-chain, and re-signing off-chain does not revoke it. Short expirations bound how long a stale signature can linger.
+- **Stale signatures.** A signed listing or offer stays fillable until it expires or the maker cancels on-chain, and re-signing off-chain does not revoke it. Short expirations bound how long a stale signature can linger. A fill retires the maker's message on the filled side only. Buying a bond does not retire your own offer on it, and selling a bond does not retire your own listing on it, so cancel that message on-chain before you trade the bond the other way.
 - **Bond invalidation after signing.** A bond's maturity value can change after a listing or offer is signed, through a holder redemption after maturity, a validator redemption before or after maturity, or a claim in a defaulted Coffer, which is the one path that can lower the value without zeroing it. Fills against the old value revert `MaturityValueMismatch`, or `BondNotOutstanding` once the value is zeroed, and the store must re-quote against the live value and the maker must re-sign.
 - **Maker-controlled code in a fill.** A contract wallet's signature check and a contract offerer's receiver hook both run with the taker's gas. A listing or offer can be written so that every fill attempt burns that gas and then fails, leaving it live. No funds move and no fill settles on terms the taker did not agree to. See Maker-controlled code and the taker's gas.
 - **Default and impairment.** Equal maturity values do not mean equal assets. A default lands when a matured bond cannot be paid, either through `declareDefault` or atomically through the holder's `holderRedeemBondOrDefault`, and while it stands a defaulted Coffer pays first come first served from whatever balance and swept stake it has, so late claimants can be paid partially or not at all. After every bond is settled at full value the validator can clear the default with `clearDefault()` and resume operations. Check `validatorDefaulted` and the Coffer balance before quoting, see Assessing a bond before quoting a price.

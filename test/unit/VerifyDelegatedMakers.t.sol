@@ -98,10 +98,10 @@ contract VerifyDelegatedMakersTest is Test {
     uint256 public bondB;
 
     bytes32 constant LISTING_TYPEHASH = keccak256(
-        "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+        "Listing(address seller,uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+        "Offer(address buyer,uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -111,7 +111,7 @@ contract VerifyDelegatedMakersTest is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("4")),
+                keccak256(bytes("5")),
                 block.chainid,
                 address(marketplace)
             )
@@ -123,7 +123,7 @@ contract VerifyDelegatedMakersTest is Test {
         view
         returns (bytes memory)
     {
-        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, mat, exp, nonce, gNonce));
+        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, vm.addr(pk), bId, pr, mat, exp, nonce, gNonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
@@ -134,7 +134,7 @@ contract VerifyDelegatedMakersTest is Test {
         view
         returns (bytes memory)
     {
-        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, nonce, gNonce));
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, vm.addr(pk), bId, wAmt, mat, exp, nonce, gNonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);

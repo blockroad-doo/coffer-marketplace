@@ -207,10 +207,10 @@ contract CofferMarketplaceTest is Test {
     // ───── EIP-712 Helpers ─────
 
     bytes32 constant LISTING_TYPEHASH = keccak256(
-        "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+        "Listing(address seller,uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+        "Offer(address buyer,uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -220,28 +220,36 @@ contract CofferMarketplaceTest is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("4")),
+                keccak256(bytes("5")),
                 block.chainid,
                 address(marketplace)
             )
         );
     }
 
-    function _listingDigest(uint256 bId, uint128 pr, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
-        internal
-        view
-        returns (bytes32)
-    {
-        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, mat, exp, nonce, gNonce));
+    function _listingDigest(
+        address maker,
+        uint256 bId,
+        uint128 pr,
+        uint128 mat,
+        uint64 exp,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, maker, bId, pr, mat, exp, nonce, gNonce));
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
     }
 
-    function _offerDigest(uint256 bId, uint128 wAmt, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
-        internal
-        view
-        returns (bytes32)
-    {
-        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, nonce, gNonce));
+    function _offerDigest(
+        address maker,
+        uint256 bId,
+        uint128 wAmt,
+        uint128 mat,
+        uint64 exp,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, maker, bId, wAmt, mat, exp, nonce, gNonce));
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
     }
 
@@ -250,7 +258,22 @@ contract CofferMarketplaceTest is Test {
         view
         returns (bytes memory)
     {
-        bytes32 digest = _listingDigest(bId, pr, mat, exp, nonce, gNonce);
+        return _signListing(pk, vm.addr(pk), bId, pr, mat, exp, nonce, gNonce);
+    }
+
+    /// @dev Signs for `maker`, the account the fill names. `pk` is the key that answers for it: the
+    ///      maker's own key for an EOA, the owner key behind a contract wallet.
+    function _signListing(
+        uint256 pk,
+        address maker,
+        uint256 bId,
+        uint128 pr,
+        uint128 mat,
+        uint64 exp,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes memory) {
+        bytes32 digest = _listingDigest(maker, bId, pr, mat, exp, nonce, gNonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
@@ -260,7 +283,20 @@ contract CofferMarketplaceTest is Test {
         view
         returns (bytes memory)
     {
-        bytes32 digest = _offerDigest(bId, wAmt, mat, exp, nonce, gNonce);
+        return _signOffer(pk, vm.addr(pk), bId, wAmt, mat, exp, nonce, gNonce);
+    }
+
+    function _signOffer(
+        uint256 pk,
+        address maker,
+        uint256 bId,
+        uint128 wAmt,
+        uint128 mat,
+        uint64 exp,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes memory) {
+        bytes32 digest = _offerDigest(maker, bId, wAmt, mat, exp, nonce, gNonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
@@ -318,7 +354,7 @@ contract CofferMarketplaceTest is Test {
     {
         uint256 nonce = marketplace.sListingNonce(who, bondId);
         uint256 gNonce = marketplace.sGlobalListingNonce(who);
-        sig = _signListing(pk, bondId, price, 1 ether, exp, nonce, gNonce);
+        sig = _signListing(pk, who, bondId, price, 1 ether, exp, nonce, gNonce);
     }
 
     function _signOfferNow(address who, uint256 pk, uint128 amount) internal view returns (bytes memory sig) {
@@ -332,7 +368,7 @@ contract CofferMarketplaceTest is Test {
     {
         uint256 nonce = marketplace.sOfferNonce(who, bondId);
         uint256 gNonce = marketplace.sGlobalOfferNonce(who);
-        sig = _signOffer(pk, bondId, amount, 1 ether, exp, nonce, gNonce);
+        sig = _signOffer(pk, who, bondId, amount, 1 ether, exp, nonce, gNonce);
     }
 
     function _mintBondTo(address to) internal returns (uint256) {

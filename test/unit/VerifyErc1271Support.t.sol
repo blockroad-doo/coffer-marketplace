@@ -106,8 +106,9 @@ contract MockWETH {
     }
 }
 
-/// @dev Safe-like ERC-1271 wallet. isValidSignature returns the magic value if and only if the
-///      provided signature recovers to a configured owner EOA, with a toggle to revoke authorization.
+/// @dev Raw-recovery ERC-1271 wallet: isValidSignature returns the magic value if and only if the
+///      provided signature recovers to a configured owner EOA over the raw digest (a Safe or an
+///      ERC-7739 wallet rehashes instead), with a toggle to revoke authorization.
 contract MockERC1271Wallet is IERC721Receiver {
     bytes4 internal constant MAGIC = 0x1626ba7e;
     bytes4 internal constant INVALID = 0xffffffff;
@@ -199,10 +200,10 @@ contract VerifyErc1271SupportTest is Test {
     uint256 public bondId;
 
     bytes32 constant LISTING_TYPEHASH = keccak256(
-        "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+        "Listing(address seller,uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+        "Offer(address buyer,uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -212,30 +213,40 @@ contract VerifyErc1271SupportTest is Test {
             abi.encode(
                 DOMAIN_TYPEHASH,
                 keccak256(bytes("CofferMarketplace")),
-                keccak256(bytes("4")),
+                keccak256(bytes("5")),
                 block.chainid,
                 address(marketplace)
             )
         );
     }
 
-    function _signListing(uint256 pk, uint256 bId, uint128 pr, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, bId, pr, mat, exp, nonce, gNonce));
+    function _signListing(
+        uint256 pk,
+        address maker,
+        uint256 bId,
+        uint128 pr,
+        uint128 mat,
+        uint64 exp,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes memory) {
+        bytes32 structHash = keccak256(abi.encode(LISTING_TYPEHASH, maker, bId, pr, mat, exp, nonce, gNonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
 
-    function _signOffer(uint256 pk, uint256 bId, uint128 wAmt, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, bId, wAmt, mat, exp, nonce, gNonce));
+    function _signOffer(
+        uint256 pk,
+        address maker,
+        uint256 bId,
+        uint128 wAmt,
+        uint128 mat,
+        uint64 exp,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes memory) {
+        bytes32 structHash = keccak256(abi.encode(OFFER_TYPEHASH, maker, bId, wAmt, mat, exp, nonce, gNonce));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
@@ -301,7 +312,7 @@ contract VerifyErc1271SupportTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(address(w), wBond);
         uint128 mat = coffer.maturityValues(wBond);
-        bytes memory sig = _signListing(WALLET_OWNER_PK, wBond, price, mat, exp, nonce, 0);
+        bytes memory sig = _signListing(WALLET_OWNER_PK, address(w), wBond, price, mat, exp, nonce, 0);
 
         uint256 wBalBefore = address(w).balance;
         uint256 fee = _fee(4 ether);
@@ -321,7 +332,7 @@ contract VerifyErc1271SupportTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(address(w), bondId);
         uint128 mat = coffer.maturityValues(bondId);
-        bytes memory sig = _signOffer(WALLET_OWNER_PK, bondId, amount, mat, exp, nonce, 0);
+        bytes memory sig = _signOffer(WALLET_OWNER_PK, address(w), bondId, amount, mat, exp, nonce, 0);
 
         uint256 sellerWethBefore = weth.balanceOf(seller);
         uint256 walletWethBefore = weth.balanceOf(address(w));
@@ -346,7 +357,7 @@ contract VerifyErc1271SupportTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(address(w), wBond);
         uint128 mat = coffer.maturityValues(wBond);
-        bytes memory sig = _signListing(WALLET_OWNER_PK, wBond, price, mat, exp, nonce, 0);
+        bytes memory sig = _signListing(WALLET_OWNER_PK, address(w), wBond, price, mat, exp, nonce, 0);
 
         // The wallet revokes its authorization after signing
         w.setAuthorized(false);
@@ -365,7 +376,7 @@ contract VerifyErc1271SupportTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(address(w), bondId);
         uint128 mat = coffer.maturityValues(bondId);
-        bytes memory sig = _signOffer(WALLET_OWNER_PK, bondId, amount, mat, exp, nonce, 0);
+        bytes memory sig = _signOffer(WALLET_OWNER_PK, address(w), bondId, amount, mat, exp, nonce, 0);
 
         w.setAuthorized(false);
 
@@ -387,7 +398,7 @@ contract VerifyErc1271SupportTest is Test {
         uint256 nonce = marketplace.sListingNonce(address(w), wBond);
         uint128 mat = coffer.maturityValues(wBond);
         // Signed by a key that is NOT the wallet's owner
-        bytes memory sig = _signListing(BUYER_PK, wBond, price, mat, exp, nonce, 0);
+        bytes memory sig = _signListing(BUYER_PK, address(w), wBond, price, mat, exp, nonce, 0);
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
@@ -409,14 +420,14 @@ contract VerifyErc1271SupportTest is Test {
         marketplace.buySignedListing{value: 1 ether}(wBond, address(w), 1 ether, mat, exp, nonce, 0, "");
     }
 
-    // ───── EOA path still works (no domain bump, existing signatures verify) ─────
+    // ───── EOA path under the version 5 domain ─────
 
     function test_eoaRegression_buyStillWorks() public {
         uint128 price = 1 ether;
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
         uint128 mat = coffer.maturityValues(bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, price, mat, exp, nonce, 0);
+        bytes memory sig = _signListing(SELLER_PK, seller, bondId, price, mat, exp, nonce, 0);
 
         uint256 fee = _fee(4 ether);
         vm.prank(buyer);
@@ -429,7 +440,7 @@ contract VerifyErc1271SupportTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
         uint128 mat = coffer.maturityValues(bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, price, mat, exp, nonce, 0);
+        bytes memory sig = _signListing(SELLER_PK, seller, bondId, price, mat, exp, nonce, 0);
         bytes memory bad = _malleate(sig);
 
         vm.prank(buyer);
@@ -442,7 +453,7 @@ contract VerifyErc1271SupportTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondId);
         uint128 mat = coffer.maturityValues(bondId);
-        bytes memory sig = _signListing(SELLER_PK, bondId, price, mat, exp, nonce, 0);
+        bytes memory sig = _signListing(SELLER_PK, seller, bondId, price, mat, exp, nonce, 0);
 
         // A zero-address seller can never own the bond, so the ownership check rejects the fill before
         // signature verification is reached. The contract never treats address(0) as a valid signer.
@@ -464,7 +475,7 @@ contract VerifyErc1271SupportTest is Test {
         uint256 nonce = marketplace.sListingNonce(buyer2, b2Bond);
         uint128 mat = coffer.maturityValues(b2Bond);
         // Valid signature from SELLER_PK, but claims buyer2 as the signer
-        bytes memory sig = _signListing(SELLER_PK, b2Bond, price, mat, exp, nonce, 0);
+        bytes memory sig = _signListing(SELLER_PK, buyer2, b2Bond, price, mat, exp, nonce, 0);
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
@@ -516,7 +527,7 @@ contract VerifyErc1271SupportTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         // Owner signs at global nonce 0
         uint128 mat = coffer.maturityValues(wBond);
-        bytes memory sig = _signListing(WALLET_OWNER_PK, wBond, price, mat, exp, 0, 0);
+        bytes memory sig = _signListing(WALLET_OWNER_PK, address(w), wBond, price, mat, exp, 0, 0);
 
         // The wallet revokes all its listings by calling cancelAllListings as msg.sender
         vm.prank(address(w));
@@ -526,5 +537,72 @@ contract VerifyErc1271SupportTest is Test {
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
         marketplace.buySignedListing{value: price}(wBond, address(w), price, mat, exp, 0, 0, sig);
+    }
+    // ───── Signer binding: one signature, one account ─────
+
+    // The maker's address is the first field of the signed struct. Before it was, the three fills
+    // below settled: a raw-recovery wallet answers for any digest its owner key signed, so a
+    // signature made for the owner's EOA verified for the wallet at the wallet's own nonces, and the
+    // other way round. Now each signature verifies only for the account it names.
+
+    function test_signerBinding_eoaListingDoesNotFillForSiblingWallet() public {
+        MockERC1271Wallet w = new MockERC1271Wallet(walletOwner);
+        uint256 ownerBond = bondNft.mintTo(walletOwner, address(coffer));
+        coffer.setMaturityValue(ownerBond, 5 ether);
+        vm.prank(walletOwner);
+        bondNft.setApprovalForAll(address(marketplace), true);
+
+        uint128 price = 1 ether;
+        uint64 exp = uint64(block.timestamp + 1 days);
+        uint128 mat = coffer.maturityValues(ownerBond);
+        // Signed for the EOA at its nonces, both zero
+        bytes memory sig = _signListing(WALLET_OWNER_PK, walletOwner, ownerBond, price, mat, exp, 0, 0);
+
+        // The bond moves to the sibling wallet, whose nonces on it are zero as well
+        vm.prank(walletOwner);
+        bondNft.transferFrom(walletOwner, address(w), ownerBond);
+        w.approveNft(address(bondNft), address(marketplace));
+
+        vm.prank(buyer);
+        vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
+        marketplace.buySignedListing{value: price}(ownerBond, address(w), price, mat, exp, 0, 0, sig);
+    }
+
+    function test_signerBinding_eoaOfferDoesNotChargeSiblingWallet() public {
+        MockERC1271Wallet w = new MockERC1271Wallet(walletOwner);
+        weth.mint(address(w), 100 ether);
+        w.approveWeth(address(weth), address(marketplace), type(uint256).max);
+
+        uint128 amount = 1 ether;
+        uint64 exp = uint64(block.timestamp + 1 days);
+        uint128 mat = coffer.maturityValues(bondId);
+        // Signed for the EOA, which holds no WETH here
+        bytes memory sig = _signOffer(WALLET_OWNER_PK, walletOwner, bondId, amount, mat, exp, 0, 0);
+
+        vm.prank(seller);
+        vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
+        marketplace.acceptSignedOffer(bondId, address(w), amount, mat, exp, 0, 0, sig);
+    }
+
+    function test_signerBinding_walletListingDoesNotFillForEoa() public {
+        MockERC1271Wallet w = new MockERC1271Wallet(walletOwner);
+        uint256 wBond = bondNft.mintTo(address(w), address(coffer));
+        coffer.setMaturityValue(wBond, 5 ether);
+
+        uint128 price = 1 ether;
+        uint64 exp = uint64(block.timestamp + 1 days);
+        uint128 mat = coffer.maturityValues(wBond);
+        // Signed for the wallet
+        bytes memory sig = _signListing(WALLET_OWNER_PK, address(w), wBond, price, mat, exp, 0, 0);
+
+        // The bond moves to the owner's EOA, whose nonces on it are zero
+        vm.prank(address(w));
+        bondNft.transferFrom(address(w), walletOwner, wBond);
+        vm.prank(walletOwner);
+        bondNft.setApprovalForAll(address(marketplace), true);
+
+        vm.prank(buyer);
+        vm.expectRevert(CofferMarketplace.InvalidSignature.selector);
+        marketplace.buySignedListing{value: price}(wBond, walletOwner, price, mat, exp, 0, 0, sig);
     }
 }

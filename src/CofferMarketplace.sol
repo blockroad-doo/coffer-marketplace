@@ -53,10 +53,10 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
     /* solhint-disable gas-small-strings, max-line-length */
     bytes32 private constant LISTING_TYPEHASH = keccak256(
-        "Listing(uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+        "Listing(address seller,uint256 bondId,uint128 price,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     bytes32 private constant OFFER_TYPEHASH = keccak256(
-        "Offer(uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
+        "Offer(address buyer,uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)"
     );
     /* solhint-enable gas-small-strings, max-line-length */
 
@@ -189,7 +189,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     ///      well. It cannot tell a wrong contract from the right one, which is a deployment concern.
     constructor(address _weth, address _cofferBondNft, address _owner, address _feeRecipient)
         Ownable(_owner)
-        EIP712("CofferMarketplace", "4")
+        EIP712("CofferMarketplace", "5")
     {
         require(_weth.code.length > 0, NotAContract());
         require(_cofferBondNft.code.length > 0, NotAContract());
@@ -257,6 +257,9 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     ///      through SignatureChecker, validated against the claimed signer. The signer is an explicit
     ///      argument rather than recovered, because a contract wallet has no key to recover. Because
     ///      ERC-1271 validity is revocable, buySignedListing and acceptSignedOffer verify at fill time.
+    ///      The maker's address is the first field of both structs, so a signature verifies for the
+    ///      account it names and for no other, which matters for a contract wallet that validates the
+    ///      raw digest against the same key as an EOA.
 
     function _verifyListingSig(
         address _signer,
@@ -269,7 +272,11 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         bytes calldata _sig
     ) internal view {
         bytes32 digest = _hashTypedDataV4(
-            keccak256(abi.encode(LISTING_TYPEHASH, _bondId, _price, _maturityValue, _expiration, _nonce, _globalNonce))
+            keccak256(
+                abi.encode(
+                    LISTING_TYPEHASH, _signer, _bondId, _price, _maturityValue, _expiration, _nonce, _globalNonce
+                )
+            )
         );
         require(SignatureChecker.isValidSignatureNowCalldata(_signer, digest, _sig), InvalidSignature());
     }
@@ -286,7 +293,9 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     ) internal view {
         bytes32 digest = _hashTypedDataV4(
             keccak256(
-                abi.encode(OFFER_TYPEHASH, _bondId, _wethAmount, _maturityValue, _expiration, _nonce, _globalNonce)
+                abi.encode(
+                    OFFER_TYPEHASH, _signer, _bondId, _wethAmount, _maturityValue, _expiration, _nonce, _globalNonce
+                )
             )
         );
         require(SignatureChecker.isValidSignatureNowCalldata(_signer, digest, _sig), InvalidSignature());
@@ -311,6 +320,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         uint256 length = _bondIds.length;
         uint256[] memory newNonces = new uint256[](length);
         for (uint256 i = 0; i < length; ++i) {
+            // forge-lint: disable-next-line(costly-loop)
             newNonces[i] = ++sListingNonce[msg.sender][_bondIds[i]];
         }
         emit ListingsCancelled(msg.sender, _bondIds, newNonces);
@@ -393,6 +403,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         uint256 length = _bondIds.length;
         uint256[] memory newNonces = new uint256[](length);
         for (uint256 i = 0; i < length; ++i) {
+            // forge-lint: disable-next-line(costly-loop)
             newNonces[i] = ++sOfferNonce[msg.sender][_bondIds[i]];
         }
         emit OffersCancelled(msg.sender, _bondIds, newNonces);
@@ -601,6 +612,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     /// @return success Whether the transfer succeeded
     // slither-disable-next-line assembly
     function _safeTransferETH(address _to, uint256 _amount, uint256 _gasLimit) internal returns (bool success) {
+        // forge-lint: disable-next-item(inline-assembly)
         // solhint-disable-next-line no-inline-assembly
         assembly {
             // call(gasLimit, to, value, inputOffset, inputSize, outputOffset, outputSize)

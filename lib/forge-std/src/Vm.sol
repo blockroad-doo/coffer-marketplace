@@ -254,7 +254,7 @@ interface VmSafe {
         bool reverted;
     }
 
-    /// Gas used. Returned by `lastCallGas`.
+    /// Gas used. Returned by `lastCallGas` and `lastFrameGas`.
     struct Gas {
         // The gas limit of the call.
         uint64 gasLimit;
@@ -437,6 +437,22 @@ interface VmSafe {
     /// The signature covers namespace || message for domain separation.
     /// Returns a 64-byte Ed25519 signature.
     function signEd25519(bytes calldata namespace, bytes calldata message, bytes32 privateKey)
+        external
+        pure
+        returns (bytes memory signature);
+
+    /// Signs `digest` as a Tempo V2 keychain signature for `account` using a secp256k1 access key.
+    /// Returns the encoded signature bytes accepted by `SignatureVerifier.verifyKeychain`.
+    function signKeychain(uint256 privateKey, address account, bytes32 digest)
+        external
+        pure
+        returns (bytes memory signature);
+
+    /// Signs `digest` as a Tempo V2 keychain signature for `account` using a root or admin secp256k1 key.
+    /// Returns the encoded signature bytes accepted by `SignatureVerifier.verifyKeychainAdmin`.
+    /// The supplied `digest` should already be domain-separated with chain ID, contract address,
+    /// and account address.
+    function signKeychainAdmin(uint256 privateKey, address account, bytes32 digest)
         external
         pure
         returns (bytes memory signature);
@@ -724,8 +740,16 @@ interface VmSafe {
         view
         returns (uint256[] memory slots);
 
-    /// Gets the gas used in the last call from the callee perspective.
-    function lastCallGas() external view returns (Gas memory gas);
+    /// Returns `true` if `spender` is on the active Tempo hardfork's implicit-approval list,
+    /// meaning it can pull TIP-20 tokens from `msg.sender` without a prior `approve()`.
+    /// Returns `false` on non-Tempo networks.
+    function isImplicitlyApproved(address spender) external view returns (bool implicitlyApproved);
+
+    /// Returns true if isolated test execution is enabled.
+    function isIsolateMode() external view returns (bool result);
+
+    /// Gets the gas used in the last call or create from the callee perspective.
+    function lastFrameGas() external view returns (Gas memory gas);
 
     /// Loads a storage slot from an address.
     function load(address target, bytes32 slot) external view returns (bytes32 data);
@@ -745,6 +769,14 @@ interface VmSafe {
 
     /// Resumes gas metering (i.e. gas usage is counted again). Noop if already on.
     function resumeGasMetering() external;
+
+    /// Performs an Ethereum JSON-RPC request to the current fork URL and returns the JSON result.
+    function rpcJson(string calldata method, string calldata params) external returns (string memory data);
+
+    /// Performs an Ethereum JSON-RPC request to the given endpoint and returns the JSON result.
+    function rpcJson(string calldata urlOrAlias, string calldata method, string calldata params)
+        external
+        returns (string memory data);
 
     /// Performs an Ethereum JSON-RPC request to the current fork URL.
     function rpc(string calldata method, string calldata params) external returns (bytes memory data);
@@ -780,6 +812,10 @@ interface VmSafe {
     /// Stops recording storage reads and writes.
     function stopRecord() external;
 
+    /// DEPRECATED: use `lastFrameGas` instead.
+    /// Gets the gas used in the last call from the callee perspective.
+    function lastCallGas() external view returns (Gas memory gas);
+
     // ======== Filesystem ========
 
     /// Closes file for reading, resetting the offset and allowing to read it from beginning with readLine.
@@ -799,13 +835,19 @@ interface VmSafe {
     /// `path` is relative to the project root.
     function createDir(string calldata path, bool recursive) external;
 
+    /// Get the source file path of the currently running test or script contract,
+    /// relative to the project root.
+    function currentFilePath() external view returns (string memory path);
+
     /// Deploys a contract from an artifact file. Takes in the relative path to the json file or the path to the
-    /// artifact in the form of <path>:<contract>:<version> where <contract> and <version> parts are optional.
+    /// artifact in the form of <path>:<contract>:<version> or <path>:<contract>:<profile> where <contract> and
+    /// <version>/<profile> parts are optional.
     /// Reverts if the target artifact contains unlinked library placeholders.
     function deployCode(string calldata artifactPath) external returns (address deployedAddress);
 
     /// Deploys a contract from an artifact file. Takes in the relative path to the json file or the path to the
-    /// artifact in the form of <path>:<contract>:<version> where <contract> and <version> parts are optional.
+    /// artifact in the form of <path>:<contract>:<version> or <path>:<contract>:<profile> where <contract> and
+    /// <version>/<profile> parts are optional.
     /// Reverts if the target artifact contains unlinked library placeholders.
     /// Additionally accepts abi-encoded constructor arguments.
     function deployCode(string calldata artifactPath, bytes calldata constructorArgs)
@@ -813,13 +855,15 @@ interface VmSafe {
         returns (address deployedAddress);
 
     /// Deploys a contract from an artifact file. Takes in the relative path to the json file or the path to the
-    /// artifact in the form of <path>:<contract>:<version> where <contract> and <version> parts are optional.
+    /// artifact in the form of <path>:<contract>:<version> or <path>:<contract>:<profile> where <contract> and
+    /// <version>/<profile> parts are optional.
     /// Reverts if the target artifact contains unlinked library placeholders.
     /// Additionally accepts `msg.value`.
     function deployCode(string calldata artifactPath, uint256 value) external returns (address deployedAddress);
 
     /// Deploys a contract from an artifact file. Takes in the relative path to the json file or the path to the
-    /// artifact in the form of <path>:<contract>:<version> where <contract> and <version> parts are optional.
+    /// artifact in the form of <path>:<contract>:<version> or <path>:<contract>:<profile> where <contract> and
+    /// <version>/<profile> parts are optional.
     /// Reverts if the target artifact contains unlinked library placeholders.
     /// Additionally accepts abi-encoded constructor arguments and `msg.value`.
     function deployCode(string calldata artifactPath, bytes calldata constructorArgs, uint256 value)
@@ -827,12 +871,14 @@ interface VmSafe {
         returns (address deployedAddress);
 
     /// Deploys a contract from an artifact file, using the CREATE2 salt. Takes in the relative path to the json file or the path to the
-    /// artifact in the form of <path>:<contract>:<version> where <contract> and <version> parts are optional.
+    /// artifact in the form of <path>:<contract>:<version> or <path>:<contract>:<profile> where <contract> and
+    /// <version>/<profile> parts are optional.
     /// Reverts if the target artifact contains unlinked library placeholders.
     function deployCode(string calldata artifactPath, bytes32 salt) external returns (address deployedAddress);
 
     /// Deploys a contract from an artifact file, using the CREATE2 salt. Takes in the relative path to the json file or the path to the
-    /// artifact in the form of <path>:<contract>:<version> where <contract> and <version> parts are optional.
+    /// artifact in the form of <path>:<contract>:<version> or <path>:<contract>:<profile> where <contract> and
+    /// <version>/<profile> parts are optional.
     /// Reverts if the target artifact contains unlinked library placeholders.
     /// Additionally accepts abi-encoded constructor arguments.
     function deployCode(string calldata artifactPath, bytes calldata constructorArgs, bytes32 salt)
@@ -840,7 +886,8 @@ interface VmSafe {
         returns (address deployedAddress);
 
     /// Deploys a contract from an artifact file, using the CREATE2 salt. Takes in the relative path to the json file or the path to the
-    /// artifact in the form of <path>:<contract>:<version> where <contract> and <version> parts are optional.
+    /// artifact in the form of <path>:<contract>:<version> or <path>:<contract>:<profile> where <contract> and
+    /// <version>/<profile> parts are optional.
     /// Reverts if the target artifact contains unlinked library placeholders.
     /// Additionally accepts `msg.value`.
     function deployCode(string calldata artifactPath, uint256 value, bytes32 salt)
@@ -848,7 +895,8 @@ interface VmSafe {
         returns (address deployedAddress);
 
     /// Deploys a contract from an artifact file, using the CREATE2 salt. Takes in the relative path to the json file or the path to the
-    /// artifact in the form of <path>:<contract>:<version> where <contract> and <version> parts are optional.
+    /// artifact in the form of <path>:<contract>:<version> or <path>:<contract>:<profile> where <contract> and
+    /// <version>/<profile> parts are optional.
     /// Reverts if the target artifact contains unlinked library placeholders.
     /// Additionally accepts abi-encoded constructor arguments and `msg.value`.
     function deployCode(string calldata artifactPath, bytes calldata constructorArgs, uint256 value, bytes32 salt)
@@ -894,11 +942,14 @@ interface VmSafe {
         returns (BroadcastTxSummary[] memory);
 
     /// Gets the creation bytecode from an artifact file. Takes in the relative path to the json file or the path to the
-    /// artifact in the form of <path>:<contract>:<version> where <contract> and <version> parts are optional.
+    /// artifact in the form of <path>:<contract>:<version> or <path>:<contract>:<profile> where <contract> and
+    /// <version>/<profile> parts are optional. Use <profile> to select artifacts compiled with a specific profile
+    /// from foundry.toml.
     function getCode(string calldata artifactPath) external view returns (bytes memory creationBytecode);
 
     /// Gets the deployed bytecode from an artifact file. Takes in the relative path to the json file or the path to the
-    /// artifact in the form of <path>:<contract>:<version> where <contract> and <version> parts are optional.
+    /// artifact in the form of <path>:<contract>:<version> or <path>:<contract>:<profile> where <contract> and
+    /// <version>/<profile> parts are optional.
     function getDeployedCode(string calldata artifactPath) external view returns (bytes memory runtimeBytecode);
 
     /// Returns the most recent deployment for the current `chainId`.
@@ -1336,7 +1387,7 @@ interface VmSafe {
         uint256 right,
         uint256 maxDelta,
         uint256 decimals,
-        string calldata error
+        string calldata err
     ) external pure;
 
     /// Compares two `int256` values. Expects difference to be less than or equal to `maxDelta`.
@@ -1350,7 +1401,7 @@ interface VmSafe {
         int256 right,
         uint256 maxDelta,
         uint256 decimals,
-        string calldata error
+        string calldata err
     ) external pure;
 
     /// Compares two `uint256` values. Expects difference to be less than or equal to `maxDelta`.
@@ -1358,14 +1409,14 @@ interface VmSafe {
 
     /// Compares two `uint256` values. Expects difference to be less than or equal to `maxDelta`.
     /// Includes error message into revert string on failure.
-    function assertApproxEqAbs(uint256 left, uint256 right, uint256 maxDelta, string calldata error) external pure;
+    function assertApproxEqAbs(uint256 left, uint256 right, uint256 maxDelta, string calldata err) external pure;
 
     /// Compares two `int256` values. Expects difference to be less than or equal to `maxDelta`.
     function assertApproxEqAbs(int256 left, int256 right, uint256 maxDelta) external pure;
 
     /// Compares two `int256` values. Expects difference to be less than or equal to `maxDelta`.
     /// Includes error message into revert string on failure.
-    function assertApproxEqAbs(int256 left, int256 right, uint256 maxDelta, string calldata error) external pure;
+    function assertApproxEqAbs(int256 left, int256 right, uint256 maxDelta, string calldata err) external pure;
 
     /// Compares two `uint256` values. Expects relative difference in percents to be less than or equal to `maxPercentDelta`.
     /// `maxPercentDelta` is an 18 decimal fixed point number, where 1e18 == 100%
@@ -1382,7 +1433,7 @@ interface VmSafe {
         uint256 right,
         uint256 maxPercentDelta,
         uint256 decimals,
-        string calldata error
+        string calldata err
     ) external pure;
 
     /// Compares two `int256` values. Expects relative difference in percents to be less than or equal to `maxPercentDelta`.
@@ -1400,7 +1451,7 @@ interface VmSafe {
         int256 right,
         uint256 maxPercentDelta,
         uint256 decimals,
-        string calldata error
+        string calldata err
     ) external pure;
 
     /// Compares two `uint256` values. Expects relative difference in percents to be less than or equal to `maxPercentDelta`.
@@ -1410,9 +1461,7 @@ interface VmSafe {
     /// Compares two `uint256` values. Expects relative difference in percents to be less than or equal to `maxPercentDelta`.
     /// `maxPercentDelta` is an 18 decimal fixed point number, where 1e18 == 100%
     /// Includes error message into revert string on failure.
-    function assertApproxEqRel(uint256 left, uint256 right, uint256 maxPercentDelta, string calldata error)
-        external
-        pure;
+    function assertApproxEqRel(uint256 left, uint256 right, uint256 maxPercentDelta, string calldata err) external pure;
 
     /// Compares two `int256` values. Expects relative difference in percents to be less than or equal to `maxPercentDelta`.
     /// `maxPercentDelta` is an 18 decimal fixed point number, where 1e18 == 100%
@@ -1421,57 +1470,57 @@ interface VmSafe {
     /// Compares two `int256` values. Expects relative difference in percents to be less than or equal to `maxPercentDelta`.
     /// `maxPercentDelta` is an 18 decimal fixed point number, where 1e18 == 100%
     /// Includes error message into revert string on failure.
-    function assertApproxEqRel(int256 left, int256 right, uint256 maxPercentDelta, string calldata error) external pure;
+    function assertApproxEqRel(int256 left, int256 right, uint256 maxPercentDelta, string calldata err) external pure;
 
     /// Asserts that two `uint256` values are equal, formatting them with decimals in failure message.
     function assertEqDecimal(uint256 left, uint256 right, uint256 decimals) external pure;
 
     /// Asserts that two `uint256` values are equal, formatting them with decimals in failure message.
     /// Includes error message into revert string on failure.
-    function assertEqDecimal(uint256 left, uint256 right, uint256 decimals, string calldata error) external pure;
+    function assertEqDecimal(uint256 left, uint256 right, uint256 decimals, string calldata err) external pure;
 
     /// Asserts that two `int256` values are equal, formatting them with decimals in failure message.
     function assertEqDecimal(int256 left, int256 right, uint256 decimals) external pure;
 
     /// Asserts that two `int256` values are equal, formatting them with decimals in failure message.
     /// Includes error message into revert string on failure.
-    function assertEqDecimal(int256 left, int256 right, uint256 decimals, string calldata error) external pure;
+    function assertEqDecimal(int256 left, int256 right, uint256 decimals, string calldata err) external pure;
 
     /// Asserts that two `bool` values are equal.
     function assertEq(bool left, bool right) external pure;
 
     /// Asserts that two `bool` values are equal and includes error message into revert string on failure.
-    function assertEq(bool left, bool right, string calldata error) external pure;
+    function assertEq(bool left, bool right, string calldata err) external pure;
 
     /// Asserts that two `string` values are equal.
     function assertEq(string calldata left, string calldata right) external pure;
 
     /// Asserts that two `string` values are equal and includes error message into revert string on failure.
-    function assertEq(string calldata left, string calldata right, string calldata error) external pure;
+    function assertEq(string calldata left, string calldata right, string calldata err) external pure;
 
     /// Asserts that two `bytes` values are equal.
     function assertEq(bytes calldata left, bytes calldata right) external pure;
 
     /// Asserts that two `bytes` values are equal and includes error message into revert string on failure.
-    function assertEq(bytes calldata left, bytes calldata right, string calldata error) external pure;
+    function assertEq(bytes calldata left, bytes calldata right, string calldata err) external pure;
 
     /// Asserts that two arrays of `bool` values are equal.
     function assertEq(bool[] calldata left, bool[] calldata right) external pure;
 
     /// Asserts that two arrays of `bool` values are equal and includes error message into revert string on failure.
-    function assertEq(bool[] calldata left, bool[] calldata right, string calldata error) external pure;
+    function assertEq(bool[] calldata left, bool[] calldata right, string calldata err) external pure;
 
     /// Asserts that two arrays of `uint256 values are equal.
     function assertEq(uint256[] calldata left, uint256[] calldata right) external pure;
 
     /// Asserts that two arrays of `uint256` values are equal and includes error message into revert string on failure.
-    function assertEq(uint256[] calldata left, uint256[] calldata right, string calldata error) external pure;
+    function assertEq(uint256[] calldata left, uint256[] calldata right, string calldata err) external pure;
 
     /// Asserts that two arrays of `int256` values are equal.
     function assertEq(int256[] calldata left, int256[] calldata right) external pure;
 
     /// Asserts that two arrays of `int256` values are equal and includes error message into revert string on failure.
-    function assertEq(int256[] calldata left, int256[] calldata right, string calldata error) external pure;
+    function assertEq(int256[] calldata left, int256[] calldata right, string calldata err) external pure;
 
     /// Asserts that two `uint256` values are equal.
     function assertEq(uint256 left, uint256 right) external pure;
@@ -1480,52 +1529,52 @@ interface VmSafe {
     function assertEq(address[] calldata left, address[] calldata right) external pure;
 
     /// Asserts that two arrays of `address` values are equal and includes error message into revert string on failure.
-    function assertEq(address[] calldata left, address[] calldata right, string calldata error) external pure;
+    function assertEq(address[] calldata left, address[] calldata right, string calldata err) external pure;
 
     /// Asserts that two arrays of `bytes32` values are equal.
     function assertEq(bytes32[] calldata left, bytes32[] calldata right) external pure;
 
     /// Asserts that two arrays of `bytes32` values are equal and includes error message into revert string on failure.
-    function assertEq(bytes32[] calldata left, bytes32[] calldata right, string calldata error) external pure;
+    function assertEq(bytes32[] calldata left, bytes32[] calldata right, string calldata err) external pure;
 
     /// Asserts that two arrays of `string` values are equal.
     function assertEq(string[] calldata left, string[] calldata right) external pure;
 
     /// Asserts that two arrays of `string` values are equal and includes error message into revert string on failure.
-    function assertEq(string[] calldata left, string[] calldata right, string calldata error) external pure;
+    function assertEq(string[] calldata left, string[] calldata right, string calldata err) external pure;
 
     /// Asserts that two arrays of `bytes` values are equal.
     function assertEq(bytes[] calldata left, bytes[] calldata right) external pure;
 
     /// Asserts that two arrays of `bytes` values are equal and includes error message into revert string on failure.
-    function assertEq(bytes[] calldata left, bytes[] calldata right, string calldata error) external pure;
+    function assertEq(bytes[] calldata left, bytes[] calldata right, string calldata err) external pure;
 
     /// Asserts that two `uint256` values are equal and includes error message into revert string on failure.
-    function assertEq(uint256 left, uint256 right, string calldata error) external pure;
+    function assertEq(uint256 left, uint256 right, string calldata err) external pure;
 
     /// Asserts that two `int256` values are equal.
     function assertEq(int256 left, int256 right) external pure;
 
     /// Asserts that two `int256` values are equal and includes error message into revert string on failure.
-    function assertEq(int256 left, int256 right, string calldata error) external pure;
+    function assertEq(int256 left, int256 right, string calldata err) external pure;
 
     /// Asserts that two `address` values are equal.
     function assertEq(address left, address right) external pure;
 
     /// Asserts that two `address` values are equal and includes error message into revert string on failure.
-    function assertEq(address left, address right, string calldata error) external pure;
+    function assertEq(address left, address right, string calldata err) external pure;
 
     /// Asserts that two `bytes32` values are equal.
     function assertEq(bytes32 left, bytes32 right) external pure;
 
     /// Asserts that two `bytes32` values are equal and includes error message into revert string on failure.
-    function assertEq(bytes32 left, bytes32 right, string calldata error) external pure;
+    function assertEq(bytes32 left, bytes32 right, string calldata err) external pure;
 
     /// Asserts that the given condition is false.
     function assertFalse(bool condition) external pure;
 
     /// Asserts that the given condition is false and includes error message into revert string on failure.
-    function assertFalse(bool condition, string calldata error) external pure;
+    function assertFalse(bool condition, string calldata err) external pure;
 
     /// Compares two `uint256` values. Expects first value to be greater than or equal to second.
     /// Formats values with decimals in failure message.
@@ -1533,7 +1582,7 @@ interface VmSafe {
 
     /// Compares two `uint256` values. Expects first value to be greater than or equal to second.
     /// Formats values with decimals in failure message. Includes error message into revert string on failure.
-    function assertGeDecimal(uint256 left, uint256 right, uint256 decimals, string calldata error) external pure;
+    function assertGeDecimal(uint256 left, uint256 right, uint256 decimals, string calldata err) external pure;
 
     /// Compares two `int256` values. Expects first value to be greater than or equal to second.
     /// Formats values with decimals in failure message.
@@ -1541,21 +1590,21 @@ interface VmSafe {
 
     /// Compares two `int256` values. Expects first value to be greater than or equal to second.
     /// Formats values with decimals in failure message. Includes error message into revert string on failure.
-    function assertGeDecimal(int256 left, int256 right, uint256 decimals, string calldata error) external pure;
+    function assertGeDecimal(int256 left, int256 right, uint256 decimals, string calldata err) external pure;
 
     /// Compares two `uint256` values. Expects first value to be greater than or equal to second.
     function assertGe(uint256 left, uint256 right) external pure;
 
     /// Compares two `uint256` values. Expects first value to be greater than or equal to second.
     /// Includes error message into revert string on failure.
-    function assertGe(uint256 left, uint256 right, string calldata error) external pure;
+    function assertGe(uint256 left, uint256 right, string calldata err) external pure;
 
     /// Compares two `int256` values. Expects first value to be greater than or equal to second.
     function assertGe(int256 left, int256 right) external pure;
 
     /// Compares two `int256` values. Expects first value to be greater than or equal to second.
     /// Includes error message into revert string on failure.
-    function assertGe(int256 left, int256 right, string calldata error) external pure;
+    function assertGe(int256 left, int256 right, string calldata err) external pure;
 
     /// Compares two `uint256` values. Expects first value to be greater than second.
     /// Formats values with decimals in failure message.
@@ -1563,7 +1612,7 @@ interface VmSafe {
 
     /// Compares two `uint256` values. Expects first value to be greater than second.
     /// Formats values with decimals in failure message. Includes error message into revert string on failure.
-    function assertGtDecimal(uint256 left, uint256 right, uint256 decimals, string calldata error) external pure;
+    function assertGtDecimal(uint256 left, uint256 right, uint256 decimals, string calldata err) external pure;
 
     /// Compares two `int256` values. Expects first value to be greater than second.
     /// Formats values with decimals in failure message.
@@ -1571,21 +1620,21 @@ interface VmSafe {
 
     /// Compares two `int256` values. Expects first value to be greater than second.
     /// Formats values with decimals in failure message. Includes error message into revert string on failure.
-    function assertGtDecimal(int256 left, int256 right, uint256 decimals, string calldata error) external pure;
+    function assertGtDecimal(int256 left, int256 right, uint256 decimals, string calldata err) external pure;
 
     /// Compares two `uint256` values. Expects first value to be greater than second.
     function assertGt(uint256 left, uint256 right) external pure;
 
     /// Compares two `uint256` values. Expects first value to be greater than second.
     /// Includes error message into revert string on failure.
-    function assertGt(uint256 left, uint256 right, string calldata error) external pure;
+    function assertGt(uint256 left, uint256 right, string calldata err) external pure;
 
     /// Compares two `int256` values. Expects first value to be greater than second.
     function assertGt(int256 left, int256 right) external pure;
 
     /// Compares two `int256` values. Expects first value to be greater than second.
     /// Includes error message into revert string on failure.
-    function assertGt(int256 left, int256 right, string calldata error) external pure;
+    function assertGt(int256 left, int256 right, string calldata err) external pure;
 
     /// Compares two `uint256` values. Expects first value to be less than or equal to second.
     /// Formats values with decimals in failure message.
@@ -1593,7 +1642,7 @@ interface VmSafe {
 
     /// Compares two `uint256` values. Expects first value to be less than or equal to second.
     /// Formats values with decimals in failure message. Includes error message into revert string on failure.
-    function assertLeDecimal(uint256 left, uint256 right, uint256 decimals, string calldata error) external pure;
+    function assertLeDecimal(uint256 left, uint256 right, uint256 decimals, string calldata err) external pure;
 
     /// Compares two `int256` values. Expects first value to be less than or equal to second.
     /// Formats values with decimals in failure message.
@@ -1601,21 +1650,21 @@ interface VmSafe {
 
     /// Compares two `int256` values. Expects first value to be less than or equal to second.
     /// Formats values with decimals in failure message. Includes error message into revert string on failure.
-    function assertLeDecimal(int256 left, int256 right, uint256 decimals, string calldata error) external pure;
+    function assertLeDecimal(int256 left, int256 right, uint256 decimals, string calldata err) external pure;
 
     /// Compares two `uint256` values. Expects first value to be less than or equal to second.
     function assertLe(uint256 left, uint256 right) external pure;
 
     /// Compares two `uint256` values. Expects first value to be less than or equal to second.
     /// Includes error message into revert string on failure.
-    function assertLe(uint256 left, uint256 right, string calldata error) external pure;
+    function assertLe(uint256 left, uint256 right, string calldata err) external pure;
 
     /// Compares two `int256` values. Expects first value to be less than or equal to second.
     function assertLe(int256 left, int256 right) external pure;
 
     /// Compares two `int256` values. Expects first value to be less than or equal to second.
     /// Includes error message into revert string on failure.
-    function assertLe(int256 left, int256 right, string calldata error) external pure;
+    function assertLe(int256 left, int256 right, string calldata err) external pure;
 
     /// Compares two `uint256` values. Expects first value to be less than second.
     /// Formats values with decimals in failure message.
@@ -1623,7 +1672,7 @@ interface VmSafe {
 
     /// Compares two `uint256` values. Expects first value to be less than second.
     /// Formats values with decimals in failure message. Includes error message into revert string on failure.
-    function assertLtDecimal(uint256 left, uint256 right, uint256 decimals, string calldata error) external pure;
+    function assertLtDecimal(uint256 left, uint256 right, uint256 decimals, string calldata err) external pure;
 
     /// Compares two `int256` values. Expects first value to be less than second.
     /// Formats values with decimals in failure message.
@@ -1631,71 +1680,71 @@ interface VmSafe {
 
     /// Compares two `int256` values. Expects first value to be less than second.
     /// Formats values with decimals in failure message. Includes error message into revert string on failure.
-    function assertLtDecimal(int256 left, int256 right, uint256 decimals, string calldata error) external pure;
+    function assertLtDecimal(int256 left, int256 right, uint256 decimals, string calldata err) external pure;
 
     /// Compares two `uint256` values. Expects first value to be less than second.
     function assertLt(uint256 left, uint256 right) external pure;
 
     /// Compares two `uint256` values. Expects first value to be less than second.
     /// Includes error message into revert string on failure.
-    function assertLt(uint256 left, uint256 right, string calldata error) external pure;
+    function assertLt(uint256 left, uint256 right, string calldata err) external pure;
 
     /// Compares two `int256` values. Expects first value to be less than second.
     function assertLt(int256 left, int256 right) external pure;
 
     /// Compares two `int256` values. Expects first value to be less than second.
     /// Includes error message into revert string on failure.
-    function assertLt(int256 left, int256 right, string calldata error) external pure;
+    function assertLt(int256 left, int256 right, string calldata err) external pure;
 
     /// Asserts that two `uint256` values are not equal, formatting them with decimals in failure message.
     function assertNotEqDecimal(uint256 left, uint256 right, uint256 decimals) external pure;
 
     /// Asserts that two `uint256` values are not equal, formatting them with decimals in failure message.
     /// Includes error message into revert string on failure.
-    function assertNotEqDecimal(uint256 left, uint256 right, uint256 decimals, string calldata error) external pure;
+    function assertNotEqDecimal(uint256 left, uint256 right, uint256 decimals, string calldata err) external pure;
 
     /// Asserts that two `int256` values are not equal, formatting them with decimals in failure message.
     function assertNotEqDecimal(int256 left, int256 right, uint256 decimals) external pure;
 
     /// Asserts that two `int256` values are not equal, formatting them with decimals in failure message.
     /// Includes error message into revert string on failure.
-    function assertNotEqDecimal(int256 left, int256 right, uint256 decimals, string calldata error) external pure;
+    function assertNotEqDecimal(int256 left, int256 right, uint256 decimals, string calldata err) external pure;
 
     /// Asserts that two `bool` values are not equal.
     function assertNotEq(bool left, bool right) external pure;
 
     /// Asserts that two `bool` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(bool left, bool right, string calldata error) external pure;
+    function assertNotEq(bool left, bool right, string calldata err) external pure;
 
     /// Asserts that two `string` values are not equal.
     function assertNotEq(string calldata left, string calldata right) external pure;
 
     /// Asserts that two `string` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(string calldata left, string calldata right, string calldata error) external pure;
+    function assertNotEq(string calldata left, string calldata right, string calldata err) external pure;
 
     /// Asserts that two `bytes` values are not equal.
     function assertNotEq(bytes calldata left, bytes calldata right) external pure;
 
     /// Asserts that two `bytes` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(bytes calldata left, bytes calldata right, string calldata error) external pure;
+    function assertNotEq(bytes calldata left, bytes calldata right, string calldata err) external pure;
 
     /// Asserts that two arrays of `bool` values are not equal.
     function assertNotEq(bool[] calldata left, bool[] calldata right) external pure;
 
     /// Asserts that two arrays of `bool` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(bool[] calldata left, bool[] calldata right, string calldata error) external pure;
+    function assertNotEq(bool[] calldata left, bool[] calldata right, string calldata err) external pure;
 
     /// Asserts that two arrays of `uint256` values are not equal.
     function assertNotEq(uint256[] calldata left, uint256[] calldata right) external pure;
 
     /// Asserts that two arrays of `uint256` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(uint256[] calldata left, uint256[] calldata right, string calldata error) external pure;
+    function assertNotEq(uint256[] calldata left, uint256[] calldata right, string calldata err) external pure;
 
     /// Asserts that two arrays of `int256` values are not equal.
     function assertNotEq(int256[] calldata left, int256[] calldata right) external pure;
 
     /// Asserts that two arrays of `int256` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(int256[] calldata left, int256[] calldata right, string calldata error) external pure;
+    function assertNotEq(int256[] calldata left, int256[] calldata right, string calldata err) external pure;
 
     /// Asserts that two `uint256` values are not equal.
     function assertNotEq(uint256 left, uint256 right) external pure;
@@ -1704,55 +1753,58 @@ interface VmSafe {
     function assertNotEq(address[] calldata left, address[] calldata right) external pure;
 
     /// Asserts that two arrays of `address` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(address[] calldata left, address[] calldata right, string calldata error) external pure;
+    function assertNotEq(address[] calldata left, address[] calldata right, string calldata err) external pure;
 
     /// Asserts that two arrays of `bytes32` values are not equal.
     function assertNotEq(bytes32[] calldata left, bytes32[] calldata right) external pure;
 
     /// Asserts that two arrays of `bytes32` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(bytes32[] calldata left, bytes32[] calldata right, string calldata error) external pure;
+    function assertNotEq(bytes32[] calldata left, bytes32[] calldata right, string calldata err) external pure;
 
     /// Asserts that two arrays of `string` values are not equal.
     function assertNotEq(string[] calldata left, string[] calldata right) external pure;
 
     /// Asserts that two arrays of `string` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(string[] calldata left, string[] calldata right, string calldata error) external pure;
+    function assertNotEq(string[] calldata left, string[] calldata right, string calldata err) external pure;
 
     /// Asserts that two arrays of `bytes` values are not equal.
     function assertNotEq(bytes[] calldata left, bytes[] calldata right) external pure;
 
     /// Asserts that two arrays of `bytes` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(bytes[] calldata left, bytes[] calldata right, string calldata error) external pure;
+    function assertNotEq(bytes[] calldata left, bytes[] calldata right, string calldata err) external pure;
 
     /// Asserts that two `uint256` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(uint256 left, uint256 right, string calldata error) external pure;
+    function assertNotEq(uint256 left, uint256 right, string calldata err) external pure;
 
     /// Asserts that two `int256` values are not equal.
     function assertNotEq(int256 left, int256 right) external pure;
 
     /// Asserts that two `int256` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(int256 left, int256 right, string calldata error) external pure;
+    function assertNotEq(int256 left, int256 right, string calldata err) external pure;
 
     /// Asserts that two `address` values are not equal.
     function assertNotEq(address left, address right) external pure;
 
     /// Asserts that two `address` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(address left, address right, string calldata error) external pure;
+    function assertNotEq(address left, address right, string calldata err) external pure;
 
     /// Asserts that two `bytes32` values are not equal.
     function assertNotEq(bytes32 left, bytes32 right) external pure;
 
     /// Asserts that two `bytes32` values are not equal and includes error message into revert string on failure.
-    function assertNotEq(bytes32 left, bytes32 right, string calldata error) external pure;
+    function assertNotEq(bytes32 left, bytes32 right, string calldata err) external pure;
 
     /// Asserts that the given condition is true.
     function assertTrue(bool condition) external pure;
 
     /// Asserts that the given condition is true and includes error message into revert string on failure.
-    function assertTrue(bool condition, string calldata error) external pure;
+    function assertTrue(bool condition, string calldata err) external pure;
 
     /// If the condition is false, discard this run's fuzz inputs and generate new ones.
     function assume(bool condition) external pure;
+
+    /// Skips a fuzz/invariant input unless `spender` is implicitly approved.
+    function assumeImplicitApproval(address spender) external view;
 
     /// Discard this run's fuzz inputs and generate new ones if next call reverted.
     function assumeNoRevert() external pure;
@@ -1907,16 +1959,13 @@ interface VmSafe {
     /// Compute the address a contract will be deployed at for a given deployer address and nonce.
     function computeCreateAddress(address deployer, uint256 nonce) external pure returns (address);
 
-    /// Utility cheatcode to copy storage of `from` contract to another `to` contract.
-    function copyStorage(address from, address to) external;
-
     /// Generates the struct hash of the canonical EIP-712 type representation and its abi-encoded data.
     /// Supports 2 different inputs:
     /// 1. Name of the type (i.e. "PermitSingle"):
     /// * requires previous binding generation with `forge bind-json`.
     /// * bindings will be retrieved from the path configured in `foundry.toml`.
     /// 2. String representation of the type (i.e. "Foo(Bar bar) Bar(uint256 baz)").
-    /// * Note: the cheatcode will use the canonical type even if the input is malformated
+    /// * Note: the cheatcode will use the canonical type even if the input is malformed
     /// with the wrong order of elements or with extra whitespaces.
     function eip712HashStruct(string calldata typeNameOrDefinition, bytes calldata abiEncodedData)
         external
@@ -1940,7 +1989,7 @@ interface VmSafe {
     /// * requires previous binding generation with `forge bind-json`.
     /// * bindings will be retrieved from the path configured in `foundry.toml`.
     /// 2. String representation of the type (i.e. "Foo(Bar bar) Bar(uint256 baz)").
-    /// * Note: the cheatcode will output the canonical type even if the input is malformated
+    /// * Note: the cheatcode will output the canonical type even if the input is malformed
     /// with the wrong order of elements or with extra whitespaces.
     function eip712HashType(string calldata typeNameOrDefinition) external pure returns (bytes32 typeHash);
 
@@ -2005,13 +2054,6 @@ interface VmSafe {
 
     /// Unpauses collection of call traces.
     function resumeTracing() external view;
-
-    /// Utility cheatcode to set arbitrary storage for given target address.
-    function setArbitraryStorage(address target) external;
-
-    /// Utility cheatcode to set arbitrary storage for given target address and overwrite
-    /// any storage slots that have been previously set.
-    function setArbitraryStorage(address target, bool overwrite) external;
 
     /// Set RNG seed.
     function setSeed(uint256 seed) external;
@@ -2278,17 +2320,25 @@ interface Vm is VmSafe {
     /// It only sets the blockhash for blocks where `block.number - 256 <= number < block.number`.
     function setBlockhash(uint256 blockNumber, bytes32 blockHash) external;
 
+    /// Sets a TIP-20 token's logo URI directly in storage.
+    /// This bypasses the token admin check, but still validates the URI against T5 constraints.
+    function setLogoURI(address token, string calldata newLogoURI) external;
+
     /// Sets the nonce of an account. Must be higher than the current nonce of the account.
     function setNonce(address account, uint64 newNonce) external;
 
     /// Sets the nonce of an account to an arbitrary value.
     function setNonceUnsafe(address account, uint64 newNonce) external;
 
-    /// Snapshot capture the gas usage of the last call by name from the callee perspective.
-    function snapshotGasLastCall(string calldata name) external returns (uint256 gasUsed);
+    /// Sets a TIP-20 token's logo URI directly in storage.
+    /// This bypasses the token admin check, but still validates the URI against T5 constraints.
+    function setTip20LogoURI(address token, string calldata newLogoURI) external;
 
-    /// Snapshot capture the gas usage of the last call by name in a group from the callee perspective.
-    function snapshotGasLastCall(string calldata group, string calldata name) external returns (uint256 gasUsed);
+    /// Snapshot capture the gas usage of the last call or create by name from the callee perspective.
+    function snapshotGasLastFrame(string calldata name) external returns (uint256 gasUsed);
+
+    /// Snapshot capture the gas usage of the last call or create by name in a group from the callee perspective.
+    function snapshotGasLastFrame(string calldata group, string calldata name) external returns (uint256 gasUsed);
 
     /// Snapshot the current state of the evm.
     /// Returns the ID of the snapshot that was created.
@@ -2364,6 +2414,14 @@ interface Vm is VmSafe {
     /// `revertTo` is being deprecated in favor of `revertToState`. It will be removed in future versions.
     function revertTo(uint256 snapshotId) external returns (bool success);
 
+    /// DEPRECATED: use `snapshotGasLastFrame` instead.
+    /// Snapshot capture the gas usage of the last call by name from the callee perspective.
+    function snapshotGasLastCall(string calldata name) external returns (uint256 gasUsed);
+
+    /// DEPRECATED: use `snapshotGasLastFrame` instead.
+    /// Snapshot capture the gas usage of the last call by name in a group from the callee perspective.
+    function snapshotGasLastCall(string calldata group, string calldata name) external returns (uint256 gasUsed);
+
     /// `snapshot` is being deprecated in favor of `snapshotState`. It will be removed in future versions.
     function snapshot() external returns (uint256 snapshotId);
 
@@ -2428,6 +2486,9 @@ interface Vm is VmSafe {
     /// Prepare an expected log with (bool checkTopic1, bool checkTopic2, bool checkTopic3, bool checkData.).
     /// Call this function, then emit an event, then call a function. Internally after the call, we check if
     /// logs were emitted in the expected order with the expected topics and data (as specified by the booleans).
+    /// Must be placed immediately before the call you want to assert on. If the next call reverts and the
+    /// revert is caught by the caller (low-level call or try/catch), the expectation remains active and may
+    /// be satisfied by a log emitted from a later call.
     function expectEmit(bool checkTopic1, bool checkTopic2, bool checkTopic3, bool checkData) external;
 
     /// Same as the previous method, but also checks supplied address against emitting contract.
@@ -2436,6 +2497,9 @@ interface Vm is VmSafe {
     /// Prepare an expected log with all topic and data checks enabled.
     /// Call this function, then emit an event, then call a function. Internally after the call, we check if
     /// logs were emitted in the expected order with the expected topics and data.
+    /// Must be placed immediately before the call you want to assert on. If the next call reverts and the
+    /// revert is caught by the caller (low-level call or try/catch), the expectation remains active and may
+    /// be satisfied by a log emitted from a later call.
     function expectEmit() external;
 
     /// Same as the previous method, but also checks supplied address against emitting contract.
@@ -2460,10 +2524,22 @@ interface Vm is VmSafe {
     /// Expect a given number of logs from a specific emitter with all topic and data checks enabled.
     function expectEmit(address emitter, uint64 count) external;
 
+    /// Expects a call to `SignatureVerifier.verifyKeychainAdmin(account, digest, signature)`.
+    /// The supplied `digest` should already be domain-separated with chain ID, contract address,
+    /// and account address.
+    function expectKeychainAdminVerified(address account, bytes32 digest, bytes calldata signature) external;
+
+    /// Expects a call to `SignatureVerifier.verifyKeychain(account, digest, signature)`.
+    function expectKeychainVerified(address account, bytes32 digest, bytes calldata signature) external;
+
+    /// Expects a TIP-20 `LogoURIUpdated(address indexed updater, string newLogoURI)` event.
+    function expectLogoURIUpdated(address token, address updater, string calldata newLogoURI) external;
+
     /// Expects an error on next call that starts with the revert data.
     function expectPartialRevert(bytes4 revertData) external;
 
     /// Expects an error on next call to reverter address, that starts with the revert data.
+    /// See `expectRevert(address)` for `reverter` matching semantics.
     function expectPartialRevert(bytes4 revertData, address reverter) external;
 
     /// Expects an error on next call with any revert data.
@@ -2473,21 +2549,35 @@ interface Vm is VmSafe {
     function expectRevert(bytes4 revertData) external;
 
     /// Expects a `count` number of reverts from the upcoming calls from the reverter address that match the revert data.
+    /// See `expectRevert(address)` for `reverter` matching semantics.
     function expectRevert(bytes4 revertData, address reverter, uint64 count) external;
 
     /// Expects a `count` number of reverts from the upcoming calls from the reverter address that exactly match the revert data.
+    /// See `expectRevert(address)` for `reverter` matching semantics.
     function expectRevert(bytes calldata revertData, address reverter, uint64 count) external;
 
     /// Expects an error on next call that exactly matches the revert data.
     function expectRevert(bytes calldata revertData) external;
 
     /// Expects an error with any revert data on next call to reverter address.
+    /// The `reverter` argument is matched against the address associated with
+    /// the frame that produced the revert:
+    /// - For a CALL: the address that was called.
+    /// - For a CREATE / CREATE2: the would-be deployed address of the failed
+    /// deployment (computed from the deployer + nonce, or salt + initcode).
+    /// For a single expected revert, the innermost reverting frame wins in
+    /// nested CALL, CREATE, or mixed chains. With `count > 1`, nested
+    /// CREATE / CREATE2 chains apply the same rule independently to each
+    /// iteration; nested CALL chains keep their existing
+    /// outermost-call-per-iteration behavior.
     function expectRevert(address reverter) external;
 
     /// Expects an error from reverter address on next call, with any revert data.
+    /// See `expectRevert(address)` for `reverter` matching semantics.
     function expectRevert(bytes4 revertData, address reverter) external;
 
     /// Expects an error from reverter address on next call, that exactly matches the revert data.
+    /// See `expectRevert(address)` for `reverter` matching semantics.
     function expectRevert(bytes calldata revertData, address reverter) external;
 
     /// Expects a `count` number of reverts from the upcoming calls with any revert data or reverter.
@@ -2500,6 +2590,7 @@ interface Vm is VmSafe {
     function expectRevert(bytes calldata revertData, uint64 count) external;
 
     /// Expects a `count` number of reverts from the upcoming calls from the reverter address.
+    /// See `expectRevert(address)` for `reverter` matching semantics.
     function expectRevert(address reverter, uint64 count) external;
 
     /// Only allows memory writes to offsets [0x00, 0x60) ∪ [min, max) in the current subcontext. If any other
@@ -2510,6 +2601,9 @@ interface Vm is VmSafe {
     /// If any other memory is written to, the test will fail. Can be called multiple times to add more ranges
     /// to the set.
     function expectSafeMemoryCall(uint64 min, uint64 max) external;
+
+    /// Expects a TIP-20 `LogoURIUpdated(address indexed updater, string newLogoURI)` event.
+    function expectTip20LogoURIUpdated(address token, address updater, string calldata newLogoURI) external;
 
     /// Marks a test as skipped. Must be called at the top level of a test.
     function skip(bool skipTest) external;
@@ -2522,6 +2616,9 @@ interface Vm is VmSafe {
 
     // ======== Utilities ========
 
+    /// Utility cheatcode to copy storage of `from` contract to another `to` contract.
+    function copyStorage(address from, address to) external;
+
     /// Causes the next contract creation (via new) to fail and return its initcode in the returndata buffer.
     /// This allows type-safe access to the initcode payload that would be used for contract creation.
     /// Example usage:
@@ -2530,4 +2627,11 @@ interface Vm is VmSafe {
     /// try new MyContract(param1, param2) { assert(false); }
     /// catch (bytes memory interceptedInitcode) { initcode = interceptedInitcode; }
     function interceptInitcode() external;
+
+    /// Utility cheatcode to set arbitrary storage for given target address.
+    function setArbitraryStorage(address target) external;
+
+    /// Utility cheatcode to set arbitrary storage for given target address and overwrite
+    /// any storage slots that have been previously set.
+    function setArbitraryStorage(address target, bool overwrite) external;
 }
