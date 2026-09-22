@@ -3,7 +3,6 @@ pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
 import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 
@@ -43,8 +42,8 @@ contract Mock7702NoSigDelegate {
     receive() external payable {}
 }
 
-/// @dev Answers ERC-1271 but implements no receiver hook, which is row O12: the signature verifies,
-///      the WETH moves, and the final NFT transfer is what reverts.
+/// @dev Answers ERC-1271 but implements no receiver hook. Delivery runs no hook, so this delegate
+///      receives the bond all the same.
 contract Mock7702NoReceiverDelegate {
     bytes4 internal constant MAGIC = 0x1626ba7e;
     bytes4 internal constant INVALID = 0xffffffff;
@@ -67,6 +66,23 @@ contract Mock7702NoReceiverDelegate {
 // on the grounds that the usual delegate validates its owner's ECDSA signature and keeps the rows
 // alive. The accepting-delegate tests below are what make that a result instead of a belief.
 //
+/// @dev Answers ERC-1271 and reverts in the receiver hook. Before the fix this was a free veto over
+///      the maker's own funded bid at inclusion time. Delivery no longer runs the hook.
+contract Mock7702VetoDelegate {
+    bytes4 internal constant MAGIC = 0x1626ba7e;
+    bytes4 internal constant INVALID = 0xffffffff;
+
+    function isValidSignature(bytes32 hash, bytes calldata sig) external view returns (bytes4) {
+        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(hash, sig);
+        if (err == ECDSA.RecoverError.NoError && recovered == address(this)) return MAGIC;
+        return INVALID;
+    }
+
+    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
+        revert("veto");
+    }
+}
+
 // Code is placed with vm.etch rather than the 7702 cheatcode for all but one test. vm.etch is
 // deterministic and assumes nothing about cheatcode lifetime, while attachDelegation designates the
 // NEXT call an EIP-7702 transaction (Vm.sol:1188) and these tests need the code live when a
@@ -82,6 +98,7 @@ contract VerifyDelegatedMakersTest is Test {
     Mock7702Delegate public accepting;
     Mock7702NoSigDelegate public silent;
     Mock7702NoReceiverDelegate public noReceiver;
+    Mock7702VetoDelegate public veto;
 
     uint256 constant SELLER_PK = 0xA11CE;
     uint256 constant BUYER_PK = 0xB0B;
@@ -156,6 +173,7 @@ contract VerifyDelegatedMakersTest is Test {
         accepting = new Mock7702Delegate();
         silent = new Mock7702NoSigDelegate();
         noReceiver = new Mock7702NoReceiverDelegate();
+        veto = new Mock7702VetoDelegate();
 
         seller = vm.addr(SELLER_PK);
         buyer = vm.addr(BUYER_PK);
@@ -240,12 +258,12 @@ contract VerifyDelegatedMakersTest is Test {
         marketplace.acceptSignedOffer(bondA, buyer, PRICE, MATURITY, exp, nonce, 0, sig);
     }
 
-    // ───── Row O12: the delegate has no receiver hook ─────
+    // ───── Delivery without the receiver hook ─────
 
-    // A valid signature, funded and approved, that no seller can ever accept. The revert arrives at
-    // the last statement of _executeAccept (CofferMarketplace.sol:578), after the WETH checks have
-    // passed, which is what makes this invisible to everything except the transfer itself.
-    function test_delegateWithoutReceiver_acceptReverts() public {
+    // The bond is delivered to the offer maker with transferFrom, so the maker's code is not asked
+    // to receive it. A delegate without a hook holds the bond all the same, and one that reverts in
+    // its hook cannot fail the fill after the WETH has moved. The signed offer is the consent.
+    function test_delegateWithoutReceiver_acceptSettles() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(buyer, bondA);
         bytes memory sig = _signOffer(BUYER_PK, bondA, PRICE, MATURITY, exp, nonce, 0);
@@ -253,11 +271,24 @@ contract VerifyDelegatedMakersTest is Test {
         _delegateTo(buyer, address(noReceiver));
 
         vm.prank(seller);
-        vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721InvalidReceiver.selector, buyer));
         marketplace.acceptSignedOffer(bondA, buyer, PRICE, MATURITY, exp, nonce, 0, sig);
 
-        assertEq(bondNft.ownerOf(bondA), seller, "nothing settled");
-        assertEq(weth.balanceOf(seller), 0, "and the WETH did not move either, the fill is atomic");
+        assertEq(bondNft.ownerOf(bondA), buyer, "the delegate holds the bond without a hook");
+        assertEq(weth.balanceOf(seller), PRICE, "the seller was paid");
+    }
+
+    function test_delegateVetoHook_cannotStopAccept() public {
+        uint64 exp = uint64(block.timestamp + 1 days);
+        uint256 nonce = marketplace.sOfferNonce(buyer, bondA);
+        bytes memory sig = _signOffer(BUYER_PK, bondA, PRICE, MATURITY, exp, nonce, 0);
+
+        _delegateTo(buyer, address(veto));
+
+        vm.prank(seller);
+        marketplace.acceptSignedOffer(bondA, buyer, PRICE, MATURITY, exp, nonce, 0, sig);
+
+        assertEq(bondNft.ownerOf(bondA), buyer, "a reverting hook does not stop the delivery");
+        assertEq(weth.balanceOf(seller), PRICE, "the seller was paid");
     }
 
     // ───── The designator itself ─────

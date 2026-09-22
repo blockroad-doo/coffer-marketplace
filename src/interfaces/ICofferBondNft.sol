@@ -40,6 +40,12 @@ interface ICofferBondNft {
     /// @return True if the address is a registered Coffer
     function isRegisteredCoffer(address coffer) external view returns (bool);
 
+    /// @notice Transfers a bond NFT from one address to another without the receiver check
+    /// @param from The current owner of the bond
+    /// @param to The new owner of the bond
+    /// @param tokenId The bond token ID to transfer
+    function transferFrom(address from, address to, uint256 tokenId) external;
+
     /// @notice Safely transfers a bond NFT from one address to another
     /// @param from The current owner of the bond
     /// @param to The new owner of the bond

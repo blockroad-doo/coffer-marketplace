@@ -24,6 +24,8 @@ import {IWETH} from "./interfaces/IWETH.sol";
  * @notice Charges a fixed fee of FEE_BPS (900 basis points, 9%) of the buyer's profit, the maturity value minus
  * the price when positive, on completed trades only, paid on top by the buyer in ETH or by the offerer in WETH
  * @notice Pays a seller that cannot receive ETH in WETH instead, so a fill never fails on the payout
+ * @notice Delivers the bond to an offer maker without the ERC-721 receiver hook, so no maker code runs after
+ * the WETH has moved
  */
 contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
@@ -576,8 +578,8 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         // solhint-disable-next-line gas-strict-inequalities
         require(IWETH(I_WETH).allowance(_buyer, address(this)) >= totalWeth, InsufficientPayment());
 
-        // The emit precedes every external call, so no callback from the transfers below (the
-        // buyer's onERC721Received, say) can place its own log at a lower log index than the sale.
+        // The emit precedes every external call, so no callback from the transfers below can place
+        // its own log at a lower log index than the sale.
         emit OfferAccepted(_bondId, _buyer, msg.sender, _wethAmount, _fee, _nonce, _globalNonce);
 
         // forge-lint: disable-next-item(arbitrary-send-erc20) _buyer is the recovered EIP-712 offer signer
@@ -589,8 +591,11 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
             IERC20(I_WETH).safeTransferFrom(_buyer, address(this), _fee);
         }
 
+        // Delivered without the receiver hook: the signed offer that names this bond is the maker's
+        // consent, and a hook would hand the maker a veto after the WETH has moved, the reason
+        // mintCofferBond mints without one.
         // slither-disable-next-line calls-loop
-        ICofferBondNft(I_COFFER_BOND_NFT).safeTransferFrom(msg.sender, _buyer, _bondId);
+        ICofferBondNft(I_COFFER_BOND_NFT).transferFrom(msg.sender, _buyer, _bondId);
     }
 
     /// @notice Transfer ETH without copying returndata, preventing returndata bomb gas griefing.
