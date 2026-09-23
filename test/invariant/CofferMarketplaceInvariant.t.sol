@@ -5,6 +5,7 @@ import {Test, console2} from "forge-std/Test.sol";
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
 import {
     CofferMarketplaceHandler,
+    HandlerWallet,
     MockBondNftForHandler,
     MockCofferForHandler,
     MockWETHForHandler
@@ -55,6 +56,7 @@ contract CofferMarketplaceInvariantTest is Test {
         }
         total += address(marketplace).balance;
         total += address(weth).balance;
+        total += feeRecipient.balance;
         assertEq(total, handler.ghostInitialTotalEth(), "Total ETH must be conserved");
     }
 
@@ -65,7 +67,35 @@ contract CofferMarketplaceInvariantTest is Test {
             total += weth.balanceOf(handler.getActorAt(i));
         }
         total += weth.balanceOf(address(marketplace));
-        assertEq(total, handler.ghostInitialTotalWeth(), "Total WETH must be conserved");
+        total += weth.balanceOf(feeRecipient);
+        // The listing fallback deposits the price into WETH, which mints (handler upgrade H-1)
+        assertEq(
+            total, handler.ghostInitialTotalWeth() + handler.ghostWethMintedByFallback(), "Total WETH must be conserved"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  Category 1b, Fee ledger and admin mirror (handler upgrade H-1)
+    // ═══════════════════════════════════════════════════════════════
+
+    /// @dev The contract keeps no fee ledger, the handler does: every settled fill adds its fee in its own asset,
+    ///      every sweep removes the whole balance of its asset. x-ray row I-5 in the handler-checkable form.
+    function invariant_feeLedger() public view {
+        assertEq(address(marketplace).balance, handler.ghostEthAccrued() - handler.ghostEthClaimed(), "ETH fee ledger");
+        assertEq(
+            weth.balanceOf(address(marketplace)),
+            handler.ghostWethAccrued() - handler.ghostWethClaimed(),
+            "WETH fee ledger"
+        );
+    }
+
+    /// @dev Owner, pending owner and fee recipient mirror the handler's prediction and never go to zero.
+    function invariant_adminMirror() public view {
+        assertEq(marketplace.owner(), handler.ghostOwner(), "owner mirror");
+        assertTrue(marketplace.owner() != address(0), "owner never zero");
+        assertEq(marketplace.pendingOwner(), handler.ghostPendingOwner(), "pending owner mirror");
+        assertEq(marketplace.sFeeRecipient(), handler.ghostFeeRecipient(), "fee recipient mirror");
+        assertTrue(marketplace.sFeeRecipient() != address(0), "fee recipient never zero");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -147,6 +177,22 @@ contract CofferMarketplaceInvariantTest is Test {
         console2.log("warpTime:                 ", handler.callsWarpTime());
         console2.log("setNonOutstanding:        ", handler.callsSetNonOutstanding());
         console2.log("transferNft:              ", handler.callsTransferNft());
+        console2.log("cancelListings:           ", handler.callsCancelListings());
+        console2.log("  entries:                ", handler.callsCancelListingsEntries());
+        console2.log("cancelOffers:             ", handler.callsCancelOffers());
+        console2.log("  entries:                ", handler.callsCancelOffersEntries());
+        console2.log("claimFees:                ", handler.callsClaimFees());
+        console2.log("claimWethFees:            ", handler.callsClaimWethFees());
+        console2.log("setFeeRecipient:          ", handler.callsSetFeeRecipient());
+        console2.log("transferOwnership:        ", handler.callsTransferOwnership());
+        console2.log("acceptOwnership:          ", handler.callsAcceptOwnership());
+        console2.log("renounceOwnership:        ", handler.callsRenounceOwnership());
+        console2.log("impairBond:               ", handler.callsImpairBond());
+        console2.log("setApproval:              ", handler.callsSetApproval());
+        console2.log("admin throttled:          ", handler.skippedAdminThrottled());
+        console2.log("setWalletMode:            ", handler.callsSetWalletMode());
+        console2.log("fallback payouts:         ", handler.ghostFallbackPayouts());
+        console2.log("wallet fills settled:     ", handler.ghostWalletFillsSettled());
         console2.log("--- Signed messages ---");
         console2.log("mintedBonds:              ", handler.getMintedBondCount());
         console2.log("listingsCreated:          ", handler.ghostTotalListingsCreated());
@@ -163,6 +209,10 @@ contract CofferMarketplaceInvariantTest is Test {
         console2.log("SameParty:                ", _buyRejected(CofferMarketplace.SameParty.selector));
         console2.log("ListingRevoked:           ", _buyRejected(CofferMarketplace.ListingRevoked.selector));
         console2.log("SellerNoLongerOwnsNft:    ", _buyRejected(CofferMarketplace.SellerNoLongerOwnsNft.selector));
+        console2.log("MarketplaceNotApproved:   ", _buyRejected(CofferMarketplace.MarketplaceNotApproved.selector));
+        console2.log("InvalidSignature:         ", _buyRejected(CofferMarketplace.InvalidSignature.selector));
+        console2.log("HookRejected:             ", _buyRejected(HandlerWallet.HookRejected.selector));
+        console2.log("InsufficientPayment:      ", _buyRejected(CofferMarketplace.InsufficientPayment.selector));
         console2.log("ExpirationNotInFuture:    ", _buyRejected(CofferMarketplace.ExpirationNotInFuture.selector));
         console2.log("BondNotOutstanding:       ", _buyRejected(CofferMarketplace.BondNotOutstanding.selector));
         console2.log("MaturityValueMismatch:    ", _buyRejected(CofferMarketplace.MaturityValueMismatch.selector));
@@ -173,6 +223,8 @@ contract CofferMarketplaceInvariantTest is Test {
         console2.log("SameParty:                ", _acceptRejected(CofferMarketplace.SameParty.selector));
         console2.log("OfferRevoked:             ", _acceptRejected(CofferMarketplace.OfferRevoked.selector));
         console2.log("NotOwner:                 ", _acceptRejected(CofferMarketplace.NotOwner.selector));
+        console2.log("MarketplaceNotApproved:   ", _acceptRejected(CofferMarketplace.MarketplaceNotApproved.selector));
+        console2.log("InvalidSignature:         ", _acceptRejected(CofferMarketplace.InvalidSignature.selector));
         console2.log("ExpirationNotInFuture:    ", _acceptRejected(CofferMarketplace.ExpirationNotInFuture.selector));
         console2.log("BondNotOutstanding:       ", _acceptRejected(CofferMarketplace.BondNotOutstanding.selector));
         console2.log("MaturityValueMismatch:    ", _acceptRejected(CofferMarketplace.MaturityValueMismatch.selector));

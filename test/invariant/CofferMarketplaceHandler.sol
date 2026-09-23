@@ -3,6 +3,8 @@ pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 interface IERC721Receiver {
     function onERC721Received(address operator, address from, uint256 tokenId, bytes calldata data)
@@ -122,6 +124,79 @@ contract MockWETHForHandler {
 ///         postcondition fails the run with a counterexample. The only silent returns left are
 ///         handler-universe limits (nothing signed yet, nothing to sign for, handler funds), each
 ///         counted so a starved path is visible in the afterInvariant summary.
+/// @dev Contract actor for the strict suite (handler upgrade H-3): an ERC-1271 wallet that validates its owner's
+///      key while `authorized`, with a receive mode that decides the listing payout leg and a hook that can
+///      reject a delivery. It never reverts inside isValidSignature, a reverting check would register as the
+///      innermost reverting frame.
+contract HandlerWallet is IERC721Receiver {
+    enum ReceiveMode {
+        Accept,
+        Reject,
+        BurnAll,
+        SpendUnder,
+        SpendOver
+    }
+
+    bytes4 internal constant MAGIC = 0x1626ba7e;
+    bytes4 internal constant INVALID = 0xffffffff;
+
+    address public immutable OWNER;
+    bool public authorized = true;
+    ReceiveMode public receiveMode;
+    bool public hookRejects;
+    uint256 public hookCalls;
+    bytes32 private _sink;
+
+    error HookRejected();
+
+    constructor(address owner_) {
+        OWNER = owner_;
+    }
+
+    function setAuthorized(bool a) external {
+        authorized = a;
+    }
+
+    function setReceiveMode(ReceiveMode m) external {
+        receiveMode = m;
+    }
+
+    function setHookRejects(bool r) external {
+        hookRejects = r;
+    }
+
+    function isValidSignature(bytes32 hash, bytes calldata sig) external view returns (bytes4) {
+        if (!authorized) return INVALID;
+        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecover(hash, sig);
+        return (err == ECDSA.RecoverError.NoError && recovered == OWNER) ? MAGIC : INVALID;
+    }
+
+    function onERC721Received(address, address, uint256, bytes calldata) external returns (bytes4) {
+        if (hookRejects) revert HookRejected();
+        ++hookCalls;
+        return IERC721Receiver.onERC721Received.selector;
+    }
+
+    receive() external payable {
+        if (receiveMode == ReceiveMode.Reject) revert();
+        if (receiveMode == ReceiveMode.BurnAll) {
+            while (true) {}
+        }
+        if (receiveMode == ReceiveMode.SpendUnder) _spin(30_000);
+        if (receiveMode == ReceiveMode.SpendOver) _spin(150_000);
+    }
+
+    /// @dev Burns about `spend` gas, then one storage write, like CostlyReceiveSeller in the unit tree
+    function _spin(uint256 spend) internal {
+        uint256 start = gasleft();
+        bytes32 acc = _sink;
+        while (start - gasleft() < spend) {
+            acc = keccak256(abi.encode(acc));
+        }
+        _sink = acc;
+    }
+}
+
 contract CofferMarketplaceHandler is Test {
     // ──── EIP-712 Constants ────
 
@@ -145,6 +220,9 @@ contract CofferMarketplaceHandler is Test {
 
     address[] public actors;
     mapping(address => uint256) public actorPk;
+    // Contract actors (handler upgrade H-3): the last three entries of `actors`, their owner key in actorPk
+    address[] public wallets;
+    mapping(address => bool) public isWallet;
 
     // ──── Signed-message snapshots (memory only, keeps the fill handlers under the stack limit) ────
 
@@ -156,6 +234,17 @@ contract CofferMarketplaceHandler is Test {
         uint64 expiration;
         uint256 nonce;
         uint256 globalNonce;
+    }
+
+    // Balances around a listing fill (handler upgrade H-3): both assets of the seller and the marketplace,
+    // the buyer's ETH, and a wallet buyer's hook counter.
+    struct BuySnapshot {
+        uint256 sellerEth;
+        uint256 sellerWeth;
+        uint256 buyerEth;
+        uint256 marketEth;
+        uint256 marketWeth;
+        uint256 hookCalls;
     }
 
     struct SignedOffer {
@@ -237,6 +326,28 @@ contract CofferMarketplaceHandler is Test {
 
     uint256 public ghostInitialTotalEth;
     uint256 public ghostInitialTotalWeth;
+    // WETH the listing fallback minted by depositing the price: the WETH sum grows by it (handler upgrade H-1)
+    uint256 public ghostWethMintedByFallback;
+
+    // ──── Ghost State: Fee ledger (handler upgrade H-1) ────
+    // The contract keeps no fee ledger (x-ray I-5): the marketplace's ETH balance must equal the fees of the
+    // settled listing fills minus what claimFees swept, its WETH balance the fees of the accepted offers minus
+    // what claimWethFees swept.
+
+    uint256 public ghostEthAccrued;
+    uint256 public ghostEthClaimed;
+    uint256 public ghostWethAccrued;
+    uint256 public ghostWethClaimed;
+
+    // ──── Ghost State: Admin mirror (handler upgrade H-1) ────
+
+    address public ghostOwner;
+    address public ghostPendingOwner;
+    address public ghostFeeRecipient;
+    // The recipient at construction, part of the conservation sums so a sweep never breaks them
+    address public initialFeeRecipient;
+    // The marketplace's operator approval per actor, granted for every actor at construction
+    mapping(address => bool) public ghostApproved;
 
     // ──── Call Counters ────
 
@@ -252,6 +363,25 @@ contract CofferMarketplaceHandler is Test {
     uint256 public callsWarpTime;
     uint256 public callsSetNonOutstanding;
     uint256 public callsTransferNft;
+    // Handler upgrade H-2
+    uint256 public callsCancelListings;
+    uint256 public callsCancelListingsEntries;
+    uint256 public callsCancelOffers;
+    uint256 public callsCancelOffersEntries;
+    uint256 public callsClaimFees;
+    uint256 public callsClaimWethFees;
+    uint256 public callsSetFeeRecipient;
+    uint256 public callsTransferOwnership;
+    uint256 public callsAcceptOwnership;
+    uint256 public callsRenounceOwnership;
+    uint256 public callsImpairBond;
+    uint256 public callsSetApproval;
+    uint256 public skippedAdminThrottled;
+    uint256 public skippedAcceptOwnershipNoPending;
+    // Handler upgrade H-3
+    uint256 public callsSetWalletMode;
+    uint256 public ghostFallbackPayouts;
+    uint256 public ghostWalletFillsSettled;
 
     // ──── Constructor ────
 
@@ -265,12 +395,16 @@ contract CofferMarketplaceHandler is Test {
         bondNft = _bondNft;
         coffer = _coffer;
         weth = _weth;
+        ghostOwner = marketplace.owner();
+        ghostFeeRecipient = marketplace.sFeeRecipient();
+        initialFeeRecipient = ghostFeeRecipient;
 
         for (uint256 i; i < 5; ++i) {
             uint256 pk = uint256(keccak256(abi.encodePacked("actor", i)));
             address actor = vm.addr(pk);
             actors.push(actor);
             actorPk[actor] = pk;
+            ghostApproved[actor] = true;
             vm.deal(actor, 1000 ether);
 
             vm.prank(actor);
@@ -278,6 +412,24 @@ contract CofferMarketplaceHandler is Test {
 
             weth.mint(actor, 1000 ether);
             vm.prank(actor);
+            weth.approve(address(marketplace), type(uint256).max);
+        }
+
+        for (uint256 i; i < 3; ++i) {
+            uint256 pk = uint256(keccak256(abi.encodePacked("wallet-owner", i)));
+            address wallet = address(new HandlerWallet(vm.addr(pk)));
+            actors.push(wallet);
+            actorPk[wallet] = pk;
+            isWallet[wallet] = true;
+            wallets.push(wallet);
+            ghostApproved[wallet] = true;
+            vm.deal(wallet, 1000 ether);
+
+            vm.prank(wallet);
+            bondNft.setApprovalForAll(address(marketplace), true);
+
+            weth.mint(wallet, 1000 ether);
+            vm.prank(wallet);
             weth.approve(address(marketplace), type(uint256).max);
         }
 
@@ -375,8 +527,13 @@ contract CofferMarketplaceHandler is Test {
         uint256 m = _mix(buyerSeed);
         address buyer = m % 8 == 0 ? o.seller : _pickActorExcluding(m / 8, o.seller);
         uint256 fee = _fee(o.maturity, o.price);
-        // Overpay by a fuzzed excess so the refund leg is exercised on every successful fill.
-        uint256 total = uint256(o.price) + fee + bound(excessSeed, 0, 1 ether);
+        // Overpay by a fuzzed excess so the refund leg is exercised on every successful fill. A wallet that
+        // burns everything it is sent gets no excess: the refund forwards all remaining gas.
+        uint256 excess = bound(excessSeed, 0, 1 ether);
+        if (isWallet[buyer] && HandlerWallet(payable(buyer)).receiveMode() == HandlerWallet.ReceiveMode.BurnAll) {
+            excess = 0;
+        }
+        uint256 total = uint256(o.price) + fee + excess;
         if (buyer.balance < total) {
             // Handler-universe limit (1000 ETH per actor, price <= 10 ETH, <= depth fills per run).
             // An ETH shortfall would surface as an empty-data call failure the oracle cannot name.
@@ -490,6 +647,237 @@ contract CofferMarketplaceHandler is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════
+    //   Handler upgrade H-2: batch cancels, sweeps, admin, impairment, approval
+    // ═══════════════════════════════════════════════════════════════
+    // Every action predicts its reverts exactly, as the fills do. The admin actions and the batch cancels are
+    // throttled to about one call in four like cancelAll, so the fills keep their share of the campaign.
+
+    /// @dev cancelListings over a fuzzed multiset of minted ids (repeats and the empty array allowed). Never
+    ///      reverts. The ghost is bumped once per entry, so the nonce mirrors check the multiplicity arithmetic.
+    function handlerCancelListings(uint256 actorSeed, uint256 idsSeed, uint8 lenSeed) external {
+        ++callsCancelListings;
+        uint256 m = _mix(actorSeed);
+        if (m % 4 != 0) {
+            ++skippedAdminThrottled;
+            return;
+        }
+        address actor = actors[(m / 4) % actors.length];
+        uint256 len = bound(lenSeed, 0, 8);
+        uint256[] memory ids = new uint256[](len);
+        for (uint256 i; i < len; ++i) {
+            ids[i] = ghostMintedBondIds[uint256(keccak256(abi.encode(idsSeed, i))) % ghostMintedBondIds.length];
+            if (_isListingActive(actor, ids[i])) ++ghostTotalListingsCancelled; // a repeated id counts once
+            ++ghostListingNonce[actor][ids[i]];
+            ++callsCancelListingsEntries;
+        }
+        vm.prank(actor);
+        marketplace.cancelListings(ids);
+    }
+
+    function handlerCancelOffers(uint256 actorSeed, uint256 idsSeed, uint8 lenSeed) external {
+        ++callsCancelOffers;
+        uint256 m = _mix(actorSeed);
+        if (m % 4 != 0) {
+            ++skippedAdminThrottled;
+            return;
+        }
+        address actor = actors[(m / 4) % actors.length];
+        uint256 len = bound(lenSeed, 0, 8);
+        uint256[] memory ids = new uint256[](len);
+        for (uint256 i; i < len; ++i) {
+            ids[i] = ghostMintedBondIds[uint256(keccak256(abi.encode(idsSeed, i))) % ghostMintedBondIds.length];
+            if (_isOfferActive(actor, ids[i])) ++ghostTotalOffersCancelled;
+            ++ghostOfferNonce[actor][ids[i]];
+            ++callsCancelOffersEntries;
+        }
+        vm.prank(actor);
+        marketplace.cancelOffers(ids);
+    }
+
+    /// @dev Picks the owner half the time and an arbitrary actor otherwise, throttled to one call in four.
+    function _adminCaller(uint256 seed) internal returns (address caller, bool proceed) {
+        uint256 m = _mix(seed);
+        if (m % 4 != 0) {
+            ++skippedAdminThrottled;
+            return (address(0), false);
+        }
+        caller = (m / 4) % 2 == 0 ? ghostOwner : _actor(m / 8);
+        proceed = true;
+    }
+
+    function _expectNotOwner(address caller) internal {
+        vm.prank(caller);
+        vm.expectRevert(
+            abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, caller), address(marketplace)
+        );
+    }
+
+    /// @dev Only the owner sweeps, only a non-zero balance sweeps, and the whole balance goes to the recipient.
+    function handlerClaimFees(uint256 callerSeed) external {
+        ++callsClaimFees;
+        (address caller, bool proceed) = _adminCaller(callerSeed);
+        if (!proceed) return;
+        if (caller != ghostOwner) {
+            _expectNotOwner(caller);
+            marketplace.claimFees();
+            return;
+        }
+        uint256 amount = address(marketplace).balance;
+        if (amount == 0) {
+            vm.prank(caller);
+            vm.expectRevert(CofferMarketplace.NothingToClaim.selector, address(marketplace));
+            marketplace.claimFees();
+            return;
+        }
+        uint256 before = ghostFeeRecipient.balance;
+        vm.prank(caller);
+        marketplace.claimFees();
+        assertEq(ghostFeeRecipient.balance, before + amount, "claim: recipient not paid the whole balance");
+        assertEq(address(marketplace).balance, 0, "claim: balance not swept");
+        ghostEthClaimed += amount;
+    }
+
+    function handlerClaimWethFees(uint256 callerSeed) external {
+        ++callsClaimWethFees;
+        (address caller, bool proceed) = _adminCaller(callerSeed);
+        if (!proceed) return;
+        if (caller != ghostOwner) {
+            _expectNotOwner(caller);
+            marketplace.claimWethFees();
+            return;
+        }
+        uint256 amount = weth.balanceOf(address(marketplace));
+        if (amount == 0) {
+            vm.prank(caller);
+            vm.expectRevert(CofferMarketplace.NothingToClaimWeth.selector, address(marketplace));
+            marketplace.claimWethFees();
+            return;
+        }
+        uint256 before = weth.balanceOf(ghostFeeRecipient);
+        vm.prank(caller);
+        marketplace.claimWethFees();
+        assertEq(weth.balanceOf(ghostFeeRecipient), before + amount, "claimWeth: recipient not paid the whole balance");
+        assertEq(weth.balanceOf(address(marketplace)), 0, "claimWeth: balance not swept");
+        ghostWethClaimed += amount;
+    }
+
+    /// @dev The recipient pool stays inside the conservation sums: the initial recipient or an actor.
+    function handlerSetFeeRecipient(uint256 callerSeed, uint256 newSeed) external {
+        ++callsSetFeeRecipient;
+        (address caller, bool proceed) = _adminCaller(callerSeed);
+        if (!proceed) return;
+        uint256 n = _mix(newSeed);
+        // Recipients stay EOAs: a wallet that rejects ETH would turn claimFees into FailedCall
+        address next = n % 8 == 0 ? address(0) : (n % 8 == 1 ? initialFeeRecipient : _eoaActor(n / 8));
+        if (caller != ghostOwner) {
+            _expectNotOwner(caller);
+            marketplace.setFeeRecipient(next);
+            return;
+        }
+        if (next == address(0)) {
+            vm.prank(caller);
+            vm.expectRevert(CofferMarketplace.ZeroAddress.selector, address(marketplace));
+            marketplace.setFeeRecipient(next);
+            return;
+        }
+        vm.prank(caller);
+        marketplace.setFeeRecipient(next);
+        ghostFeeRecipient = next;
+    }
+
+    /// @dev A zero target cancels the pending transfer, which Ownable2Step allows.
+    function handlerTransferOwnership(uint256 callerSeed, uint256 newSeed) external {
+        ++callsTransferOwnership;
+        (address caller, bool proceed) = _adminCaller(callerSeed);
+        if (!proceed) return;
+        uint256 n = _mix(newSeed);
+        address next = n % 8 == 0 ? address(0) : _actor(n / 8);
+        if (caller != ghostOwner) {
+            _expectNotOwner(caller);
+            marketplace.transferOwnership(next);
+            return;
+        }
+        vm.prank(caller);
+        marketplace.transferOwnership(next);
+        ghostPendingOwner = next;
+    }
+
+    /// @dev Only the pending owner accepts. A zero pending owner is never pranked.
+    function handlerAcceptOwnership(uint256 callerSeed) external {
+        ++callsAcceptOwnership;
+        uint256 m = _mix(callerSeed);
+        if (m % 4 != 0) {
+            ++skippedAdminThrottled;
+            return;
+        }
+        address caller = (m / 4) % 2 == 0 ? ghostPendingOwner : _actor(m / 8);
+        if (caller == address(0)) {
+            ++skippedAcceptOwnershipNoPending;
+            return;
+        }
+        if (caller != ghostPendingOwner) {
+            _expectNotOwner(caller);
+            marketplace.acceptOwnership();
+            return;
+        }
+        vm.prank(caller);
+        marketplace.acceptOwnership();
+        ghostOwner = caller;
+        ghostPendingOwner = address(0);
+    }
+
+    /// @dev Renouncing is disabled for the owner and unauthorized for everyone else.
+    function handlerRenounceOwnership(uint256 callerSeed) external {
+        ++callsRenounceOwnership;
+        (address caller, bool proceed) = _adminCaller(callerSeed);
+        if (!proceed) return;
+        if (caller != ghostOwner) {
+            _expectNotOwner(caller);
+            marketplace.renounceOwnership();
+            return;
+        }
+        vm.prank(caller);
+        vm.expectRevert(CofferMarketplace.RenounceOwnershipDisabled.selector, address(marketplace));
+        marketplace.renounceOwnership();
+    }
+
+    /// @dev The defaulted-coffer claim: the live value drops to a lower non-zero value, so every message signed
+    ///      at the old value now meets MaturityValueMismatch and a re-signed one fills at the new value.
+    function handlerImpairBond(uint256 bondSeed, uint128 newVal) external {
+        ++callsImpairBond;
+        uint256 m = _mix(bondSeed);
+        if (m % 4 != 0) {
+            ++skippedAdminThrottled;
+            return;
+        }
+        uint256 bondId = ghostMintedBondIds[(m / 4) % ghostMintedBondIds.length];
+        uint128 live = coffer.maturityValues(bondId);
+        if (live <= 1) return;
+        coffer.setMaturityValue(bondId, uint128(bound(newVal, 1, live - 1)));
+    }
+
+    /// @dev Revokes the marketplace's operator approval about one call in eight and re-grants it otherwise, so
+    ///      the MarketplaceNotApproved rows fire without starving the fills.
+    function handlerSetApproval(uint256 actorSeed, bool grant) external {
+        ++callsSetApproval;
+        address actor = _actor(actorSeed);
+        bool approved = grant || _mix(actorSeed) % 4 != 0;
+        vm.prank(actor);
+        bondNft.setApprovalForAll(address(marketplace), approved);
+        ghostApproved[actor] = approved;
+    }
+
+    /// @dev Handler upgrade H-3: a wallet's receive mode, its authorization (off one time in four) and its
+    ///      delivery hook (rejecting one time in four) change mid-campaign, the oracle reads them live.
+    function handlerSetWalletMode(uint256 walletSeed, uint8 mode, uint256 authSeed, uint256 hookSeed) external {
+        ++callsSetWalletMode;
+        HandlerWallet w = HandlerWallet(payable(wallets[_mix(walletSeed) % wallets.length]));
+        w.setReceiveMode(HandlerWallet.ReceiveMode(mode % 5));
+        w.setAuthorized(_mix(authSeed) % 4 != 0);
+        w.setHookRejects(_mix(hookSeed) % 4 == 0);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     //                       View Accessors
     // ═══════════════════════════════════════════════════════════════
 
@@ -517,26 +905,47 @@ contract CofferMarketplaceHandler is Test {
     ///      call must revert with exactly that selector, or the call must succeed and settle
     ///      exactly, after which the identical replay must be rejected on the nonce check.
     function _attemptBuy(SignedListing memory o, address buyer, uint256 fee, uint256 total) internal {
-        bytes memory sig =
-            _signListing(actorPk[o.seller], o.bondId, o.price, o.maturity, o.expiration, o.nonce, o.globalNonce);
+        bytes memory sig = _signListing(
+            o.seller, actorPk[o.seller], o.bondId, o.price, o.maturity, o.expiration, o.nonce, o.globalNonce
+        );
 
-        bytes4 expected = _expectedBuyRevert(o, buyer);
+        bytes4 expected = _expectedBuyRevert(o, buyer, total - o.price - fee);
         if (expected != bytes4(0)) {
             vm.prank(buyer);
-            vm.expectRevert(expected, address(marketplace));
+            // The two rows raised past the nonce bump start in the wallet's frame, so no reverter is named
+            if (
+                expected == HandlerWallet.HookRejected.selector
+                    || expected == CofferMarketplace.InsufficientPayment.selector
+            ) {
+                vm.expectRevert(expected);
+            } else {
+                vm.expectRevert(expected, address(marketplace));
+            }
             _callBuy(o, total, sig);
             ++ghostBuyRejectedBySelector[expected];
             return;
         }
 
-        uint256 sellerBefore = o.seller.balance;
-        uint256 buyerBefore = buyer.balance;
-        uint256 marketBefore = address(marketplace).balance;
+        BuySnapshot memory s = BuySnapshot({
+            sellerEth: o.seller.balance,
+            sellerWeth: weth.balanceOf(o.seller),
+            buyerEth: buyer.balance,
+            marketEth: address(marketplace).balance,
+            marketWeth: weth.balanceOf(address(marketplace)),
+            hookCalls: isWallet[buyer] ? HandlerWallet(payable(buyer)).hookCalls() : 0
+        });
+        bool ethLeg = _payoutInEth(o.seller);
 
         vm.prank(buyer);
         _callBuy(o, total, sig);
 
-        _assertBuySettled(o, buyer, fee, sellerBefore, buyerBefore, marketBefore);
+        _assertBuySettled(o, buyer, fee, s, ethLeg);
+        ghostEthAccrued += fee;
+        if (!ethLeg) {
+            ghostWethMintedByFallback += o.price;
+            ++ghostFallbackPayouts;
+        }
+        if (isWallet[o.seller] || isWallet[buyer]) ++ghostWalletFillsSettled;
 
         ++ghostListingNonce[o.seller][o.bondId];
         ghostBondOwner[o.bondId] = buyer;
@@ -550,19 +959,40 @@ contract CofferMarketplaceHandler is Test {
     }
 
     /// @dev Mirrors the require order of buySignedListing after dropping the checks the handler
-    ///      universe cannot trigger (ZeroPrice, MarketplaceNotApproved, InvalidSignature,
-    ///      InsufficientPayment). Returns 0 when the fill must succeed.
-    function _expectedBuyRevert(SignedListing memory o, address buyer) internal view returns (bytes4) {
+    ///      universe cannot trigger (ZeroPrice, the pre-bump InsufficientPayment). Returns 0 when the fill
+    ///      must succeed. The wallet rows are InvalidSignature before the maturity checks and, past the nonce
+    ///      bump, the delivery hook and the refund.
+    function _expectedBuyRevert(SignedListing memory o, address buyer, uint256 excess) internal view returns (bytes4) {
         if (buyer == o.seller) return CofferMarketplace.SameParty.selector;
         if (o.nonce != ghostListingNonce[o.seller][o.bondId]) return CofferMarketplace.ListingRevoked.selector;
         if (o.globalNonce != ghostListingGlobalNonce[o.seller]) return CofferMarketplace.ListingRevoked.selector;
         if (ghostBondOwner[o.bondId] != o.seller) return CofferMarketplace.SellerNoLongerOwnsNft.selector;
+        if (!ghostApproved[o.seller]) return CofferMarketplace.MarketplaceNotApproved.selector;
         // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > o.expiration) return CofferMarketplace.ExpirationNotInFuture.selector;
+        if (isWallet[o.seller] && !HandlerWallet(payable(o.seller)).authorized()) {
+            return CofferMarketplace.InvalidSignature.selector;
+        }
         uint128 live = coffer.maturityValues(o.bondId);
         if (live == 0) return CofferMarketplace.BondNotOutstanding.selector;
         if (live != o.maturity) return CofferMarketplace.MaturityValueMismatch.selector;
+        // Past the nonce bump: the delivery hook of a wallet buyer, then the refund to a wallet that rejects ETH
+        if (isWallet[buyer]) {
+            HandlerWallet w = HandlerWallet(payable(buyer));
+            if (w.hookRejects()) return HandlerWallet.HookRejected.selector;
+            if (excess > 0 && w.receiveMode() == HandlerWallet.ReceiveMode.Reject) {
+                return CofferMarketplace.InsufficientPayment.selector;
+            }
+        }
         return bytes4(0);
+    }
+
+    /// @dev The listing payout leg: ETH for an EOA and for a wallet whose receive accepts or stays under the
+    ///      bound, WETH through the fallback for every other wallet mode.
+    function _payoutInEth(address seller) internal view returns (bool) {
+        if (!isWallet[seller]) return true;
+        HandlerWallet.ReceiveMode m = HandlerWallet(payable(seller)).receiveMode();
+        return m == HandlerWallet.ReceiveMode.Accept || m == HandlerWallet.ReceiveMode.SpendUnder;
     }
 
     function _callBuy(SignedListing memory o, uint256 value, bytes memory sig) internal {
@@ -571,18 +1001,30 @@ contract CofferMarketplaceHandler is Test {
         );
     }
 
-    function _assertBuySettled(
-        SignedListing memory o,
-        address buyer,
-        uint256 fee,
-        uint256 sellerBefore,
-        uint256 buyerBefore,
-        uint256 marketBefore
-    ) internal view {
+    /// @dev The seller is paid the price in exactly one asset, decided by its receive alone, the marketplace's
+    ///      own WETH never moves on a listing fill, and a wallet buyer's hook ran exactly once.
+    function _assertBuySettled(SignedListing memory o, address buyer, uint256 fee, BuySnapshot memory s, bool ethLeg)
+        internal
+        view
+    {
         assertEq(bondNft.ownerOf(o.bondId), buyer, "buy: NFT not delivered to buyer");
-        assertEq(o.seller.balance, sellerBefore + o.price, "buy: seller not paid exactly price");
-        assertEq(buyer.balance, buyerBefore - o.price - fee, "buy: buyer charged other than price + fee");
-        assertEq(address(marketplace).balance, marketBefore + fee, "buy: marketplace balance moved by other than fee");
+        if (ethLeg) {
+            assertEq(o.seller.balance, s.sellerEth + o.price, "buy: seller not paid exactly price in ETH");
+            assertEq(weth.balanceOf(o.seller), s.sellerWeth, "buy: WETH paid on the ETH leg");
+        } else {
+            assertEq(o.seller.balance, s.sellerEth, "buy: ETH reached a seller that cannot take it");
+            assertEq(weth.balanceOf(o.seller), s.sellerWeth + o.price, "buy: fallback paid other than price in WETH");
+        }
+        assertEq(weth.balanceOf(address(marketplace)), s.marketWeth, "buy: a listing fill moved the marketplace's WETH");
+        assertEq(buyer.balance, s.buyerEth - o.price - fee, "buy: buyer charged other than price + fee");
+        assertEq(address(marketplace).balance, s.marketEth + fee, "buy: marketplace balance moved by other than fee");
+        if (isWallet[buyer]) {
+            assertEq(
+                HandlerWallet(payable(buyer)).hookCalls(),
+                s.hookCalls + 1,
+                "buy: wallet buyer's hook ran other than once"
+            );
+        }
         assertEq(marketplace.sListingNonce(o.seller, o.bondId), o.nonce + 1, "buy: nonce not consumed by exactly one");
         assertEq(marketplace.sGlobalListingNonce(o.seller), o.globalNonce, "buy: global nonce changed by a fill");
     }
@@ -591,7 +1033,7 @@ contract CofferMarketplaceHandler is Test {
     function _attemptAccept(SignedOffer memory o, address caller) internal {
         uint256 fee = _fee(o.maturity, o.amount);
         bytes memory sig =
-            _signOffer(actorPk[o.buyer], o.bondId, o.amount, o.maturity, o.expiration, o.nonce, o.globalNonce);
+            _signOffer(o.buyer, actorPk[o.buyer], o.bondId, o.amount, o.maturity, o.expiration, o.nonce, o.globalNonce);
 
         bytes4 expected = _expectedAcceptRevert(o, caller, fee);
         if (expected != bytes4(0)) {
@@ -605,11 +1047,18 @@ contract CofferMarketplaceHandler is Test {
         uint256 callerBefore = weth.balanceOf(caller);
         uint256 buyerBefore = weth.balanceOf(o.buyer);
         uint256 marketBefore = weth.balanceOf(address(marketplace));
+        uint256 hookCallsBefore = isWallet[o.buyer] ? HandlerWallet(payable(o.buyer)).hookCalls() : 0;
 
         vm.prank(caller);
         _callAccept(o, sig);
 
         _assertAcceptSettled(o, caller, fee, callerBefore, buyerBefore, marketBefore);
+        if (isWallet[o.buyer]) {
+            // Delivery without a receiver hook (M5): no offerer code runs after the WETH has moved
+            assertEq(HandlerWallet(payable(o.buyer)).hookCalls(), hookCallsBefore, "accept: a hook ran on delivery");
+        }
+        ghostWethAccrued += fee;
+        if (isWallet[o.buyer] || isWallet[caller]) ++ghostWalletFillsSettled;
 
         ++ghostOfferNonce[o.buyer][o.bondId];
         ghostBondOwner[o.bondId] = o.buyer;
@@ -623,7 +1072,7 @@ contract CofferMarketplaceHandler is Test {
     }
 
     /// @dev Mirrors the require order of acceptSignedOffer after dropping the checks the handler
-    ///      universe cannot trigger (ZeroAmount, MarketplaceNotApproved, InvalidSignature).
+    ///      universe cannot trigger (ZeroAmount). A de-authorized wallet offerer meets InvalidSignature.
     ///      `fee` is what the contract charges once the maturity checks pass, so it is only
     ///      relevant to the balance and allowance checks that follow them.
     function _expectedAcceptRevert(SignedOffer memory o, address caller, uint256 fee) internal view returns (bytes4) {
@@ -631,8 +1080,12 @@ contract CofferMarketplaceHandler is Test {
         if (o.nonce != ghostOfferNonce[o.buyer][o.bondId]) return CofferMarketplace.OfferRevoked.selector;
         if (o.globalNonce != ghostOfferGlobalNonce[o.buyer]) return CofferMarketplace.OfferRevoked.selector;
         if (ghostBondOwner[o.bondId] != caller) return CofferMarketplace.NotOwner.selector;
+        if (!ghostApproved[caller]) return CofferMarketplace.MarketplaceNotApproved.selector;
         // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp > o.expiration) return CofferMarketplace.ExpirationNotInFuture.selector;
+        if (isWallet[o.buyer] && !HandlerWallet(payable(o.buyer)).authorized()) {
+            return CofferMarketplace.InvalidSignature.selector;
+        }
         uint128 live = coffer.maturityValues(o.bondId);
         if (live == 0) return CofferMarketplace.BondNotOutstanding.selector;
         if (live != o.maturity) return CofferMarketplace.MaturityValueMismatch.selector;
@@ -696,6 +1149,11 @@ contract CofferMarketplaceHandler is Test {
 
     function _actor(uint256 seed) internal view returns (address) {
         return actors[_mix(seed) % actors.length];
+    }
+
+    /// @dev One of the five EOA actors (the first five entries)
+    function _eoaActor(uint256 seed) internal view returns (address) {
+        return actors[_mix(seed) % 5];
     }
 
     function _isListingActive(address actor, uint256 bondId) internal view returns (bool) {
@@ -852,6 +1310,7 @@ contract CofferMarketplaceHandler is Test {
             total += actors[i].balance;
         }
         total += address(marketplace).balance;
+        total += initialFeeRecipient.balance;
     }
 
     function _sumWethBalances() internal view returns (uint256 total) {
@@ -859,6 +1318,7 @@ contract CofferMarketplaceHandler is Test {
             total += weth.balanceOf(actors[i]);
         }
         total += weth.balanceOf(address(marketplace));
+        total += weth.balanceOf(initialFeeRecipient);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -903,22 +1363,33 @@ contract CofferMarketplaceHandler is Test {
         return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
     }
 
-    function _signListing(uint256 pk, uint256 bId, uint128 pr, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 digest = _listingDigest(vm.addr(pk), bId, pr, mat, exp, nonce, gNonce);
+    /// @dev The digest names the maker (an EOA or a wallet), the key is the maker's own or its wallet owner's.
+    function _signListing(
+        address maker,
+        uint256 pk,
+        uint256 bId,
+        uint128 pr,
+        uint128 mat,
+        uint64 exp,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes memory) {
+        bytes32 digest = _listingDigest(maker, bId, pr, mat, exp, nonce, gNonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
 
-    function _signOffer(uint256 pk, uint256 bId, uint128 wAmt, uint128 mat, uint64 exp, uint256 nonce, uint256 gNonce)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 digest = _offerDigest(vm.addr(pk), bId, wAmt, mat, exp, nonce, gNonce);
+    function _signOffer(
+        address maker,
+        uint256 pk,
+        uint256 bId,
+        uint128 wAmt,
+        uint128 mat,
+        uint64 exp,
+        uint256 nonce,
+        uint256 gNonce
+    ) internal view returns (bytes memory) {
+        bytes32 digest = _offerDigest(maker, bId, wAmt, mat, exp, nonce, gNonce);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }

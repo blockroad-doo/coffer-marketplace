@@ -378,6 +378,130 @@ contract CofferMarketplaceFeesTest is Test {
         marketplace.buySignedListing{value: price}(bondId, seller, price, mat, exp, nonce, 0, sig);
     }
 
+    // ───── Exact-payment boundary (gap row MG-01) ─────
+    //
+    // The README publishes price + fee and offerAmount + fee as the requirement. These pin that the published
+    // number is exact on both paths: it settles, and one wei less reverts InsufficientPayment. The two checks of
+    // the accept path (balance, then allowance) share a selector, so each test isolates one of them.
+
+    struct Boundary {
+        uint128 paid; // listing price or offer amount
+        uint128 mat;
+        uint64 exp;
+        uint256 nonce;
+        uint256 total; // paid + fee, the exact requirement
+        bytes sig;
+    }
+
+    /// @dev A 1 ether listing on a 2 ether bond: profit 1 ether, fee 0.09 ether, total 1.09 ether.
+    function _boundaryListing() internal returns (Boundary memory b) {
+        coffer.setMaturityValue(2 ether);
+        b.paid = 1 ether;
+        b.mat = coffer.maturityValue();
+        b.exp = uint64(block.timestamp + 1 days);
+        b.nonce = marketplace.sListingNonce(seller, bondId);
+        b.total = uint256(b.paid) + _fee(1 ether);
+        b.sig = _signListing(SELLER_PK, bondId, b.paid, b.mat, b.exp, b.nonce, 0);
+    }
+
+    /// @dev The offer twin, signed by the buyer at the live nonces.
+    function _boundaryOffer() internal returns (Boundary memory b) {
+        coffer.setMaturityValue(2 ether);
+        b.paid = 1 ether;
+        b.mat = coffer.maturityValue();
+        b.exp = uint64(block.timestamp + 1 days);
+        b.nonce = marketplace.sOfferNonce(buyer, bondId);
+        b.total = uint256(b.paid) + _fee(1 ether);
+        b.sig = _signOffer(BUYER_PK, bondId, b.paid, b.mat, b.exp, b.nonce, 0);
+    }
+
+    /// @dev Move every wei of the buyer's WETH above `keep` to a parking address, so the balance check alone
+    ///      decides the fill while the max allowance stays in place.
+    function _parkWethAbove(uint256 keep) internal {
+        uint256 held = weth.balanceOf(buyer);
+        vm.prank(buyer);
+        require(weth.transfer(makeAddr("parking"), held - keep), "transfer failed");
+    }
+
+    function test_buySignedListing_exactPayment_settlesWithoutRefund() public {
+        Boundary memory b = _boundaryListing();
+        uint256 buyerBefore = buyer.balance;
+        uint256 sellerBefore = seller.balance;
+
+        vm.prank(buyer);
+        marketplace.buySignedListing{value: b.total}(bondId, seller, b.paid, b.mat, b.exp, b.nonce, 0, b.sig);
+
+        assertEq(buyerBefore - buyer.balance, b.total, "buyer charged exactly price + fee, no refund leg");
+        assertEq(seller.balance - sellerBefore, b.paid, "seller paid exactly the price");
+        assertEq(address(marketplace).balance, b.total - b.paid, "marketplace kept exactly the fee");
+        assertEq(bondNft.ownerOf(bondId), buyer);
+        assertEq(marketplace.sListingNonce(seller, bondId), b.nonce + 1);
+    }
+
+    function test_buySignedListing_revert_oneWeiShort() public {
+        Boundary memory b = _boundaryListing();
+
+        vm.prank(buyer);
+        vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
+        marketplace.buySignedListing{value: b.total - 1}(bondId, seller, b.paid, b.mat, b.exp, b.nonce, 0, b.sig);
+
+        assertEq(bondNft.ownerOf(bondId), seller, "nothing moved");
+        assertEq(marketplace.sListingNonce(seller, bondId), b.nonce, "nonce not consumed");
+        assertEq(address(marketplace).balance, 0);
+    }
+
+    function test_acceptSignedOffer_exactBalance_settles() public {
+        Boundary memory b = _boundaryOffer();
+        _parkWethAbove(b.total);
+
+        vm.prank(seller);
+        marketplace.acceptSignedOffer(bondId, buyer, b.paid, b.mat, b.exp, b.nonce, 0, b.sig);
+
+        assertEq(weth.balanceOf(buyer), 0, "the exact balance is fully consumed");
+        assertEq(weth.balanceOf(seller), b.paid);
+        assertEq(weth.balanceOf(address(marketplace)), b.total - b.paid);
+        assertEq(bondNft.ownerOf(bondId), buyer);
+    }
+
+    function test_acceptSignedOffer_revert_balanceOneWeiShort() public {
+        Boundary memory b = _boundaryOffer();
+        _parkWethAbove(b.total - 1);
+
+        vm.prank(seller);
+        vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
+        marketplace.acceptSignedOffer(bondId, buyer, b.paid, b.mat, b.exp, b.nonce, 0, b.sig);
+
+        assertEq(weth.balanceOf(buyer), b.total - 1, "nothing moved");
+        assertEq(bondNft.ownerOf(bondId), seller);
+        assertEq(marketplace.sOfferNonce(buyer, bondId), b.nonce);
+    }
+
+    function test_acceptSignedOffer_exactAllowance_settles() public {
+        Boundary memory b = _boundaryOffer();
+        vm.prank(buyer);
+        weth.approve(address(marketplace), b.total);
+
+        vm.prank(seller);
+        marketplace.acceptSignedOffer(bondId, buyer, b.paid, b.mat, b.exp, b.nonce, 0, b.sig);
+
+        assertEq(weth.allowance(buyer, address(marketplace)), 0, "the exact allowance is fully consumed");
+        assertEq(weth.balanceOf(seller), b.paid);
+        assertEq(weth.balanceOf(address(marketplace)), b.total - b.paid);
+    }
+
+    function test_acceptSignedOffer_revert_allowanceOneWeiShort() public {
+        Boundary memory b = _boundaryOffer();
+        vm.prank(buyer);
+        weth.approve(address(marketplace), b.total - 1);
+
+        vm.prank(seller);
+        vm.expectRevert(CofferMarketplace.InsufficientPayment.selector);
+        marketplace.acceptSignedOffer(bondId, buyer, b.paid, b.mat, b.exp, b.nonce, 0, b.sig);
+
+        assertEq(weth.allowance(buyer, address(marketplace)), b.total - 1, "nothing moved");
+        assertEq(bondNft.ownerOf(bondId), seller);
+    }
+
     // ───── Fee math: acceptSignedOffer (profit-based) ─────
 
     function test_acceptSignedOffer_chargesProfitFee() public {

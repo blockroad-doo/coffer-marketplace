@@ -48,7 +48,7 @@ A bond is considered **outstanding** while its `bondMaturityValue != 0`. The mar
 
 | Interface | Purpose |
 |---|---|
-| `ICofferBondNft` | The marketplace uses `ownerOf`, `cofferOf`, `isApprovedForAll`, and `safeTransferFrom` |
+| `ICofferBondNft` | The marketplace uses `ownerOf`, `cofferOf`, `isApprovedForAll`, `safeTransferFrom`, and `transferFrom`. A listing fill delivers the bond with `safeTransferFrom` and an accepted offer delivers it with `transferFrom` |
 | `ICoffer` | Query bond conditions via `sHolderConditions`, which gives maturity value, duration, and start timestamp. Trades are gated on maturity value alone. Pricing reads the Coffer directly through the address that `getBondData` returns |
 | `IWETH` | ERC-20 operations for Wrapped ETH, namely `balanceOf`, `allowance`, `transfer`, `transferFrom`, and `deposit` |
 
@@ -58,15 +58,15 @@ A bond is considered **outstanding** while its `bondMaturityValue != 0`. The mar
 
 ### Listings (ETH)
 
-1. Seller signs an EIP-712 `Listing(bondId, price, maturityValue, expiration, nonce, globalNonce)` message with their wallet, using the current on-chain per-bond nonce. Signing costs nothing.
+1. Seller signs an EIP-712 `Listing(seller, bondId, price, maturityValue, expiration, nonce, globalNonce)` message with their wallet, using the current on-chain per-bond nonce. Signing costs nothing.
 2. The signed listing is posted to the off-chain store. There is no on-chain registration step.
-3. Buyer calls `buySignedListing()` passing the listing parameters and the seller's signature. The contract rejects self-trades and a zero price, checks the signed per-bond and global nonces against the current ones, checks the seller still owns the bond and has the marketplace approved, checks the listing is unexpired, verifies the signature against the seller, checks the bond is outstanding and that the signed `maturityValue` equals the bond's live maturity value (reverting `MaturityValueMismatch` otherwise), computes the profit-based fee (profit is the maturity value minus the price when positive, fee is `profit * FEE_BPS / BPS_DENOMINATOR`), requires the sent ETH to cover price plus fee, bumps the nonce to prevent replay, and executes the trade. The NFT goes to the buyer, the ETH price goes to the seller (with a WETH deposit and transfer fallback if the seller rejects ETH), the fee stays in the marketplace, and excess ETH is refunded to the buyer.
+3. Buyer calls `buySignedListing()` passing the listing parameters and the seller's signature. The contract rejects self-trades and a zero price, checks the signed per-bond and global nonces against the current ones, checks the seller still owns the bond and has the marketplace approved, checks the listing is unexpired, verifies the signature against the seller, checks the bond is outstanding and that the signed `maturityValue` equals the bond's live maturity value (reverting `MaturityValueMismatch` otherwise), computes the profit-based fee (profit is the maturity value minus the price when positive, fee is `profit * FEE_BPS / BPS_DENOMINATOR`), requires the sent ETH to cover price plus fee, bumps the nonce to prevent replay, and executes the trade. The NFT goes to the buyer, the ETH price goes to the seller (with a WETH deposit and transfer fallback if the seller rejects ETH), the fee stays in the marketplace, and excess ETH is refunded to the buyer. A fill at the expiration second still settles, one second later it reverts `ExpirationNotInFuture`.
 
 The ETH payout forwards at most `SELLER_PAYOUT_GAS_LIMIT` (100,000) gas to the seller. A seller whose `receive` costs more than that, or burns gas deliberately, is paid in WETH through the fallback instead of failing the trade, and the bound keeps the fallback affordable at an ordinary gas limit. Because a seller can change what its `receive` does between a buyer's gas estimate and inclusion, buyers should submit fills with roughly 175,000 gas of headroom above the estimate, which covers the bounded payout plus the WETH fallback.
 
 ### Offers (WETH)
 
-1. Buyer signs an EIP-712 `Offer(bondId, wethAmount, maturityValue, expiration, nonce, globalNonce)` message at the current on-chain per-bond nonce. Signing costs nothing.
+1. Buyer signs an EIP-712 `Offer(buyer, bondId, wethAmount, maturityValue, expiration, nonce, globalNonce)` message at the current on-chain per-bond nonce. Signing costs nothing.
 2. The signed offer is posted to the off-chain store. There is no on-chain registration step, and the contract does not check the WETH balance or allowance until acceptance. A store that serves offers should check both before storing one.
 3. Seller calls `acceptSignedOffer()` passing the offer parameters and the buyer's signature. The contract rejects self-trades and a zero amount, checks the signed per-bond and global nonces against the current ones, requires the caller to own the bond and have the marketplace approved, checks the offer is unexpired, verifies the signature against the buyer, checks the bond is outstanding and that the signed `maturityValue` equals the bond's live maturity value (reverting `MaturityValueMismatch` otherwise), computes the WETH fee at the constant rate, bumps the nonce to prevent replay, then verifies the buyer has sufficient WETH balance and allowance and executes the trade. The WETH amount goes from buyer to seller, the WETH fee goes from buyer to the marketplace, and the NFT transfers from seller to buyer with `transferFrom`, without the receiver hook, since the signed offer that names the bond is the buyer's consent.
 
@@ -155,7 +155,7 @@ A matured bond stays outstanding until someone settles it. The holder pulls the 
 
 ```
 1. Seller: cofferBondNft.setApprovalForAll(marketplace, true)
-2. Seller: signTypedData(marketplace, Listing(bondId, price, maturityValue, expiration, nonce, globalNonce))   (nonce = current sListingNonce, maturityValue = current getBondData(bondId) maturity)
+2. Seller: signTypedData(marketplace, Listing(seller, bondId, price, maturityValue, expiration, nonce, globalNonce))   (nonce = current sListingNonce, maturityValue = current getBondData(bondId) maturity)
 3. Seller: post the signed listing to the store (off-chain, no gas)
 4. Buyer:  marketplace.buySignedListing(bondId, seller, price, maturityValue, expiration, nonce, globalNonce, sig)   {value: price + buyFee}
 ```
@@ -164,7 +164,7 @@ A matured bond stays outstanding until someone settles it. The holder pulls the 
 
 ```
 1. Buyer:  weth.approve(marketplace, offerAmount + expectedFee)
-2. Buyer:  signTypedData(marketplace, Offer(bondId, wethAmount, maturityValue, expiration, nonce, globalNonce))   (nonce = current sOfferNonce, maturityValue = current getBondData(bondId) maturity)
+2. Buyer:  signTypedData(marketplace, Offer(buyer, bondId, wethAmount, maturityValue, expiration, nonce, globalNonce))   (nonce = current sOfferNonce, maturityValue = current getBondData(bondId) maturity)
 3. Buyer:  post the signed offer to the store (off-chain, no gas)
 4. Seller: cofferBondNft.setApprovalForAll(marketplace, true)
 5. Seller: marketplace.acceptSignedOffer(bondId, buyer, wethAmount, maturityValue, expiration, nonce, globalNonce, sig)

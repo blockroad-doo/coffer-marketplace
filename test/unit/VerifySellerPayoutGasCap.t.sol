@@ -10,6 +10,9 @@ pragma solidity 0.8.34;
 // and the fill settles in WETH at an ordinary gas limit. Sellers whose receive is merely expensive
 // rather than malicious are paid in WETH too, which is a degradation, not a failure.
 //
+// The two fuzzes at the end (gap row MG-03) pin that the taker's gas limit never picks the asset: a cheap
+// receive is paid in ETH by every fill that settles, an expensive one in WETH, and a fill that fails moves nothing.
+//
 // Run: forge test --match-path "test/unit/VerifySellerPayoutGasCap.t.sol" -vv
 
 import {Test} from "forge-std/Test.sol";
@@ -269,5 +272,72 @@ contract VerifySellerPayoutGasCapTest is Test {
     /// @notice The bound is published on-chain so takers can size a fill's gas limit against it.
     function test_gasLimitConstantIsPublished() public view {
         assertEq(marketplace.SELLER_PAYOUT_GAS_LIMIT(), 100_000, "published seller payout gas limit");
+    }
+
+    // ───── Gap row MG-03: the taker's gas limit cannot pick the payout asset ─────
+    //
+    // The payout forwards min(SELLER_PAYOUT_GAS_LIMIT, 63/64 of the remaining gas) plus the 2300 stipend. When
+    // that is below a cheap receive's cost, the remainder after the callee runs out is at most 1/64 of about 84k,
+    // under the fallback's first cold call, so the fill fails whole instead of degrading to WETH. A receive above
+    // the bound fails at every gas limit, so a fill that settles pays WETH at every gas limit.
+
+    /// @notice A seller whose receive fits the bound is paid in ETH by every fill that settles, whatever gas
+    ///         limit the taker submits. The fills that fail change nothing.
+    function testFuzz_sellerPayout_cheapReceive_neverWeth(uint256 gasLimit, uint32 spend) public {
+        // spend plus the trailing cold SSTORE (about 22k) plus the loop's overshoot stays under 100k
+        spend = uint32(bound(spend, 0, 60_000));
+        gasLimit = bound(gasLimit, 0, 1_000_000);
+        CostlyReceiveSeller seller = new CostlyReceiveSeller(spend);
+        uint256 bondId = _listFrom(address(seller));
+        uint256 buyerBefore = buyer.balance;
+
+        (bool ok,) = _fill(address(seller), bondId, "", gasLimit);
+
+        assertEq(weth.balanceOf(address(seller)), 0, "a cheap receive is never routed to WETH");
+        if (ok) {
+            assertEq(address(seller).balance, PRICE, "a settled fill paid the seller in ETH");
+            assertEq(address(marketplace).balance, FEE);
+            assertEq(buyer.balance, buyerBefore - TOTAL);
+            assertEq(bondNft.ownerOf(bondId), buyer);
+            assertEq(marketplace.sListingNonce(address(seller), bondId), 1);
+        } else {
+            assertEq(address(seller).balance, 0, "a failed fill paid nothing");
+            assertEq(address(marketplace).balance, 0);
+            assertEq(buyer.balance, buyerBefore);
+            assertEq(bondNft.ownerOf(bondId), address(seller));
+            assertEq(marketplace.sListingNonce(address(seller), bondId), 0);
+        }
+        // Not vacuous: an ordinary gas limit settles every seller of this class
+        if (gasLimit >= 400_000) assertTrue(ok, "an ordinary gas limit must settle a cheap receive");
+    }
+
+    /// @notice A seller whose receive exceeds the bound is paid in WETH by every fill that settles.
+    function testFuzz_sellerPayout_expensiveReceive_alwaysWeth(uint256 gasLimit, uint32 spend) public {
+        // The callee never holds more than 102.3k and the loop alone needs spend, so 110k and up never finishes
+        spend = uint32(bound(spend, 110_000, 400_000));
+        gasLimit = bound(gasLimit, 0, 1_000_000);
+        CostlyReceiveSeller seller = new CostlyReceiveSeller(spend);
+        uint256 bondId = _listFrom(address(seller));
+        uint256 buyerBefore = buyer.balance;
+
+        (bool ok,) = _fill(address(seller), bondId, "", gasLimit);
+
+        assertEq(address(seller).balance, 0, "an expensive receive is never paid in ETH");
+        if (ok) {
+            assertEq(weth.balanceOf(address(seller)), PRICE, "a settled fill paid the seller in WETH");
+            assertEq(weth.balanceOf(address(marketplace)), 0, "no WETH stranded in the marketplace");
+            assertEq(address(marketplace).balance, FEE);
+            assertEq(buyer.balance, buyerBefore - TOTAL);
+            assertEq(bondNft.ownerOf(bondId), buyer);
+            assertEq(marketplace.sListingNonce(address(seller), bondId), 1);
+        } else {
+            assertEq(weth.balanceOf(address(seller)), 0, "a failed fill paid nothing");
+            assertEq(address(marketplace).balance, 0);
+            assertEq(buyer.balance, buyerBefore);
+            assertEq(bondNft.ownerOf(bondId), address(seller));
+            assertEq(marketplace.sListingNonce(address(seller), bondId), 0);
+        }
+        // Measured: burn plus fallback is about 214k at 500k (test_burningSeller_gasStaysBounded)
+        if (gasLimit >= 400_000) assertTrue(ok, "an ordinary gas limit must settle through the fallback");
     }
 }

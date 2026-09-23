@@ -189,6 +189,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     /// @dev The two token addresses are immutable and have no setter, so a wrong value is permanent.
     ///      Requiring code at both rejects an address that holds none, which covers address(0) as
     ///      well. It cannot tell a wrong contract from the right one, which is a deployment concern.
+    // forge-lint: disable-next-line(missing-zero-check)
     constructor(address _weth, address _cofferBondNft, address _owner, address _feeRecipient)
         Ownable(_owner)
         EIP712("CofferMarketplace", "5")
