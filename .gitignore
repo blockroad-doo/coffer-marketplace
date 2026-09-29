@@ -1,6 +1,7 @@
 # Compiler files
 cache/
 out/
+lcov.info
 
 # Lint tooling (solhint is pinned in package.json, installed with npm ci)
 node_modules/
@@ -12,6 +13,11 @@ node_modules/
 
 # Docs
 docs/
+audit/
+ai_audit.md
 
 # Dotenv file
 .env
+
+# Claude Code
+.claude/
