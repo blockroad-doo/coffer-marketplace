@@ -6,7 +6,7 @@ solc = "0.8.34"
 # Pinned so bytecode semantics do not follow whatever forge release is installed.
 evm_version = "osaka"
 optimizer = false
-remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"]
+remappings = ["@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/", "forge-std/=lib/forge-std/src/"]
 no_match_coverage = "^test/|^script/|^integration/|^audit-poc/"
 
 # Keeps plain `forge test` (and the ci profile) on the unit suite. This filter applies even under
