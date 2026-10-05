@@ -30,9 +30,9 @@ contract MockBondNft {
 
     function ownerOf(uint256 tokenId) external view returns (address) {
         address owner = _owners[tokenId];
-        // The real ERC-721 reverts this custom error, and rows L10 and O8 name it: a burned bond
-        // fails inside ownerOf before the marketplace reaches its own maturity check. A string
-        // revert here would let those tests pass on the wrong evidence.
+        // The real ERC-721 reverts this custom error: a burned bond fails inside ownerOf before
+        // the marketplace reaches its own maturity check. A string revert here would let the
+        // burned-bond tests pass on the wrong evidence.
         require(owner != address(0), IERC721Errors.ERC721NonexistentToken(tokenId));
         return owner;
     }
@@ -58,8 +58,8 @@ contract MockBondNft {
     function safeTransferFrom(address from, address to, uint256 tokenId) external {
         transferFrom(from, to, tokenId);
         // The same helper the real ERC-721 runs, so a receiver that refuses produces
-        // ERC721InvalidReceiver rather than a string. Row O12 names that error, and the code-bearing
-        // check inside it is what makes a 7702 delegate a receiver at all (ERC721Utils.sol:32).
+        // ERC721InvalidReceiver rather than a string. The code-bearing check inside it is what
+        // makes a 7702 delegate a receiver at all (ERC721Utils.sol:32).
         ERC721Utils.checkOnERC721Received(msg.sender, from, to, tokenId, "");
     }
 
@@ -898,7 +898,7 @@ contract CofferMarketplaceTest is Test {
     // ───── Fill events carry the consumed nonces ─────
 
     // The fill events name the exact signed message: the consumed per-bond nonce and the global
-    // nonce it was signed at. The indexer attributes fills to stored rows by these
+    // nonce it was signed at. A reader of the events matches a fill to its signed message by these
     // values, so they must be the consumed ones — not the post-bump ones, and not always zero.
     // Both nonces are advanced before the fill so a zero-defaulted emit cannot pass.
 

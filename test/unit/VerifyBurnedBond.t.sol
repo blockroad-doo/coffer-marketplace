@@ -6,17 +6,17 @@ import {IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.s
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
 import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 
-// The burn path of rows L10 and O8 in marketplace_gaps.md.
+// The burn path of a settled bond, on the listing side and on the offer side.
 //
-// Both rows say a burned bond fails inside ownerOf with ERC721NonexistentToken, before the
-// marketplace reaches its own BondNotOutstanding check, and that BondNotOutstanding is therefore
-// unreachable against the real Coffer. The reason is that the real Coffer deletes the holder record
-// and burns the NFT in one call (coffer-smart-contracts/src/Coffer.sol:699-700), so the state where
-// the maturity reads zero while the token still exists is never produced.
+// A burned bond fails inside ownerOf with ERC721NonexistentToken, before the marketplace reaches
+// its own BondNotOutstanding check, so BondNotOutstanding is unreachable against the real Coffer.
+// The reason is that the real Coffer deletes the holder record and burns the NFT in one call
+// (coffer-smart-contracts/src/Coffer.sol:699-700), so the state where the maturity reads zero
+// while the token still exists is never produced.
 //
 // Two tests take the burn path on each side, and a third produces the unreachable state by hand to
 // show the two are genuinely different reverts. Without that third test the first two would only
-// show that something reverts, not that the guard the rows name is the one that fires.
+// show that something reverts, not which guard fires.
 contract VerifyBurnedBondTest is Test {
     CofferMarketplace public marketplace;
     MockBondNft public bondNft;
@@ -102,7 +102,7 @@ contract VerifyBurnedBondTest is Test {
         weth.approve(address(marketplace), type(uint256).max);
     }
 
-    // ───── Row L10, the burn half ─────
+    // ───── Listing side─────
 
     // buySignedListing reads ownerOf at CofferMarketplace.sol:352, five statements before it asks
     // the coffer for a maturity at :361. A burned token has no owner, so the read itself reverts and
@@ -119,7 +119,7 @@ contract VerifyBurnedBondTest is Test {
         marketplace.buySignedListing{value: PRICE}(bondA, seller, PRICE, MATURITY, exp, nonce, 0, sig);
     }
 
-    // ───── Row O8, the burn half ─────
+    // ───── Offer side─────
 
     // acceptSignedOffer reads ownerOf at :434 for its own NotOwner check, so the offer side fails in
     // the same place and for the same reason.
@@ -141,9 +141,8 @@ contract VerifyBurnedBondTest is Test {
 
     // Zero the maturity while leaving the token alive, which the mock can do and the real Coffer
     // cannot. BondNotOutstanding is what answers, which is a different error from the two tests
-    // above. That difference is the whole content of the rows' claim: the burn path and the
-    // zero-maturity path are distinguishable, and only the first one is reachable, so
-    // BondNotOutstanding is dead code against the real Coffer rather than a case the book must serve.
+    // above. The burn path and the zero-maturity path are distinguishable, and only the first one
+    // is reachable, so BondNotOutstanding is dead code against the real Coffer.
     function test_zeroedMaturityWithLiveNft_isTheUnreachableState() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondB);

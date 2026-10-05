@@ -5,15 +5,12 @@ import {Test} from "forge-std/Test.sol";
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
 import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 
-// Gap row MG-02 (VS-01 and the event clauses of ST-01 and ST-02).
-//
-// The off-chain store rebuilds its liveness view from the cancel and admin events, so each payload must
-// equal the storage transition it reports: the post-bump nonce on a single cancel, the running value per
-// entry on a batch cancel with a repeated id, the post-bump global nonce on a cancelAll, the recipient of
-// record after setFeeRecipient, and the recipient's delta on both sweeps. Every topic and the data bytes are
-// checked against the pinned emitter, so the expected arrays are built exactly. Nonces are advanced once
-// before each single or global cancel so a zero default cannot pass. The two sweeps read the whole balance
-// (README Fee Flow), so a dealt or minted balance is a faithful fixture.
+// Each cancel and admin event payload must equal the storage transition it reports: the post-bump nonce on
+// a single cancel, the running value per entry on a batch cancel with a repeated id, the post-bump global
+// nonce on a cancelAll, the recipient of record after setFeeRecipient, and the recipient's delta on both
+// sweeps. Every topic and the data bytes are checked against the pinned emitter, so the expected arrays are
+// built exactly. Nonces are advanced once before each single or global cancel so a zero default cannot pass.
+// The two sweeps read the whole balance (README Fee Flow), so a dealt or minted balance is a faithful fixture.
 contract VerifyEventPayloadsTest is Test {
     CofferMarketplace public marketplace;
     MockBondNft public bondNft;

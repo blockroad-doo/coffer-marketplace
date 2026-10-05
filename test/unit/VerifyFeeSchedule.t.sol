@@ -5,8 +5,6 @@ import {Test} from "forge-std/Test.sol";
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
 import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 
-// Gap row MG-05 (RD-01 boundary and monotone clauses, RD-03, ADV-10, SPEC-03).
-//
 // Stateless fuzzes of the one rounding site. The fee is floor(profit * 900 / 10000) on both paths: never
 // rounded up, less than one wei short of exact, zero exactly when the profit is at most 11 wei, strictly
 // below a positive profit, non-decreasing in the profit, the same on both paths, and free of overflow over
@@ -142,7 +140,7 @@ contract VerifyFeeScheduleTest is Test {
         if (profit > 0) assertLt(fee, profit, "fee not below the profit");
     }
 
-    /// @notice RD-03, ADV-10: the offer side over the whole domain, the offerer holding exactly amount + fee.
+    /// @notice The offer side over the whole domain, the offerer holding exactly amount + fee.
     ///         Neither profit * FEE_BPS nor amount + fee overflows, and the exact balance settles.
     function testFuzz_feeAcceptSigned_profitRange_noOverflow(uint128 maturity, uint128 amount) public {
         maturity = uint128(bound(maturity, 1, type(uint128).max));
@@ -163,7 +161,7 @@ contract VerifyFeeScheduleTest is Test {
         assertEq(bondNft.ownerOf(bondA), buyer);
     }
 
-    /// @notice RD-01: the floor identity on both paths, the fee read from the balance delta.
+    /// @notice The floor identity on both paths, the fee read from the balance delta.
     function testFuzz_feeFloorIdentity(uint128 maturity, uint128 paid, bool offerSide) public {
         maturity = uint128(bound(maturity, 1, type(uint128).max));
         paid = uint128(bound(paid, 1, maturity));
@@ -180,7 +178,7 @@ contract VerifyFeeScheduleTest is Test {
         _assertFloor(profit, fee);
     }
 
-    /// @notice RD-01, SPEC-03: on two bonds at one maturity a lower price never pays a lower fee and never
+    /// @notice On two bonds at one maturity a lower price never pays a lower fee and never
     ///         costs the taker more in total.
     function testFuzz_feeMonotone(uint128 maturity, uint128 p1, uint128 p2, bool offerSide) public {
         maturity = uint128(bound(maturity, 2, type(uint128).max));
@@ -193,7 +191,7 @@ contract VerifyFeeScheduleTest is Test {
         assertLe(outlay1, outlay2, "a lower price cost the taker more");
     }
 
-    /// @notice ADV-10: a full-balance msg.value is refunded to the wei.
+    /// @notice A full-balance msg.value is refunded to the wei.
     function testFuzz_buyFullBalanceRefund(uint128 maturity, uint128 price, uint256 extra) public {
         maturity = uint128(bound(maturity, 1, type(uint128).max));
         price = uint128(bound(price, 1, type(uint128).max));
@@ -212,7 +210,7 @@ contract VerifyFeeScheduleTest is Test {
         assertEq(address(marketplace).balance, fee);
     }
 
-    /// @notice SPEC-03: the outlay never exceeds max(paid, maturity), formula-free on both paths.
+    /// @notice The outlay never exceeds max(paid, maturity), formula-free on both paths.
     function testFuzz_outlayNeverAboveFace(uint128 maturity, uint128 paid, bool offerSide) public {
         maturity = uint128(bound(maturity, 1, type(uint128).max));
         paid = uint128(bound(paid, 1, type(uint128).max));
@@ -225,7 +223,7 @@ contract VerifyFeeScheduleTest is Test {
         else assertLt(outlay, maturity, "below face must stay below face");
     }
 
-    /// @notice RD-03: the same profit pays the same fee on both paths, a guard against a refactor that splits them.
+    /// @notice The same profit pays the same fee on both paths, a guard against a refactor that splits them.
     function testFuzz_feeSameOnBothPaths(uint128 maturity, uint128 paid) public {
         maturity = uint128(bound(maturity, 1, type(uint128).max));
         paid = uint128(bound(paid, 1, type(uint128).max));

@@ -5,18 +5,14 @@ import {Test} from "forge-std/Test.sol";
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
 import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 
-// Rows L3, L6, O3 and O5 of marketplace_gaps.md, plus the expiry boundary.
+// Four reversible conditions and the expiry boundary.
 //
 // A signature lives until its nonce moves. Four of the conditions that make a fill revert are
 // reversible, and the contract holds no memory of them: when the condition goes away the same
-// signature at the same nonce fills again. The off-chain store depends on that, it hides those rows
-// at read time instead of retiring them, so these tests are what make "hide, never retire" a
-// property of the contract rather than a claim about it.
+// signature at the same nonce fills again. These tests pin that as a property of the contract.
 //
 // The boundary test pins _validateTrade's inequality (CofferMarketplace.sol:498). The contract
-// allows block.timestamp == expiration; an off-chain store that serves only expiration > now hides
-// the row one second early, which is the safe direction and only safe if the contract really
-// does fill at the boundary second.
+// allows block.timestamp == expiration, so a fill at the boundary second settles.
 contract VerifyReversibleConditionsTest is Test {
     CofferMarketplace public marketplace;
     MockBondNft public bondNft;
@@ -106,11 +102,10 @@ contract VerifyReversibleConditionsTest is Test {
         weth.approve(address(marketplace), type(uint256).max);
     }
 
-    // ───── Row L3: the seller grants the approval again ─────
+    // ───── The seller grants the approval again─────
 
     // A revoke makes every listing of that seller revert, and a re-grant brings them all back. The
-    // signature is untouched throughout and the nonce never moves, which is why the book revives a
-    // retired listing on a re-post rather than asking for a new signature.
+    // signature is untouched throughout and the nonce never moves.
     function test_regrantedApproval_revivesListing() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondA);
@@ -134,7 +129,7 @@ contract VerifyReversibleConditionsTest is Test {
         assertEq(bondNft.ownerOf(bondA), buyer, "the same signature fills after the re-grant");
     }
 
-    // ───── Row L6: the seller gets the bond back ─────
+    // ───── The seller gets the bond back─────
 
     // The listing dies while the bond is elsewhere and revives when it returns. setApprovalForAll is
     // per owner and operator rather than per token, so the seller's approval survives the round trip
@@ -162,11 +157,10 @@ contract VerifyReversibleConditionsTest is Test {
         assertEq(bondNft.ownerOf(bondA), buyer, "the same signature fills after the bond returns");
     }
 
-    // ───── Row O3: the maker's WETH comes back ─────
+    // ───── The maker's WETH comes back─────
 
     // The funds condition is checked inside the fill and nowhere else, so an offer is dead exactly
-    // as long as the money is gone. This is why the funds mirror hides rather than retires: a
-    // shortage that heals leaves a signature that works again.
+    // as long as the money is gone. A shortage that heals leaves a signature that works again.
     function test_wethRestored_revivesOffer() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sOfferNonce(buyer, bondA);
@@ -191,12 +185,11 @@ contract VerifyReversibleConditionsTest is Test {
         assertEq(bondNft.ownerOf(bondA), buyer, "the same signature fills once the funds return");
     }
 
-    // ───── Row O5: one balance behind many offers ─────
+    // ───── One balance behind many offers─────
 
     // Five live bids over one balance that covers exactly one of them. Every signature is valid and
-    // every offer is genuinely fillable until one of them settles, which is why the book serves all
-    // five and the funds gate measures each offer against the balance on its own rather than
-    // summing them. Oversubscription is the design, not a defect.
+    // every offer is genuinely fillable until one of them settles. Oversubscription is the design,
+    // not a defect.
     function test_oversubscribedBalance_exactlyOneFills() public {
         uint64 exp = uint64(block.timestamp + 1 days);
 

@@ -6,18 +6,18 @@ import {CofferMarketplace} from "../src/CofferMarketplace.sol";
 
 /// @title DeployCofferMarketplace
 /// @author Coffer
-/// @notice Deploys CofferMarketplace and prints the address line to record in the workspace .env
+/// @notice Deploys CofferMarketplace and prints the address line to record in `../.env`
 /// @dev Runbook: `set -a && source ../.env && set +a` first (plain `source` sets shell-local
 ///      variables that the forge child process never sees; `set -a` auto-exports them), then
 ///      `forge script script/DeployCofferMarketplace.s.sol --broadcast --rpc-url $HOODI_RPC_URL`.
 ///      After a successful broadcast, manually copy the printed
-///      `HOODI_COFFER_MARKETPLACE_ADDRESS=...` line into `../.env` for downstream consumers,
-///      the other repositories that hold the address. The address is also recorded in `broadcast/`.
+///      `HOODI_COFFER_MARKETPLACE_ADDRESS=...` line into `../.env`. The address is also recorded
+///      in `broadcast/`.
 ///      Requires HOODI_MARKETPLACE_OWNER and HOODI_MARKETPLACE_FEE_RECIPIENT to be set and
 ///      non-zero; the script reverts otherwise (no fallback keys). For mainnet, introduce a
 ///      MAINNET_* key set and adjust names accordingly.
 contract DeployCofferMarketplace is Script {
-    /// @notice Deploy the marketplace contract using environment variables from the workspace .env
+    /// @notice Deploy the marketplace contract using environment variables from `../.env`
     function run() external {
         address weth = vm.envAddress("HOODI_WETH_ADDRESS");
         address bondNft = vm.envAddress("HOODI_COFFER_BOND_NFT_ADDRESS");

@@ -10,7 +10,7 @@ pragma solidity 0.8.34;
 // and the fill settles in WETH at an ordinary gas limit. Sellers whose receive is merely expensive
 // rather than malicious are paid in WETH too, which is a degradation, not a failure.
 //
-// The two fuzzes at the end (gap row MG-03) pin that the taker's gas limit never picks the asset: a cheap
+// The two fuzzes at the end pin that the taker's gas limit never picks the asset: a cheap
 // receive is paid in ETH by every fill that settles, an expensive one in WETH, and a fill that fails moves nothing.
 //
 // Run: forge test --match-path "test/unit/VerifySellerPayoutGasCap.t.sol" -vv
@@ -274,7 +274,7 @@ contract VerifySellerPayoutGasCapTest is Test {
         assertEq(marketplace.SELLER_PAYOUT_GAS_LIMIT(), 100_000, "published seller payout gas limit");
     }
 
-    // ───── Gap row MG-03: the taker's gas limit cannot pick the payout asset ─────
+    // ───── The taker's gas limit cannot pick the payout asset─────
     //
     // The payout forwards min(SELLER_PAYOUT_GAS_LIMIT, 63/64 of the remaining gas) plus the 2300 stipend. When
     // that is below a cheap receive's cost, the remainder after the callee runs out is at most 1/64 of about 84k,

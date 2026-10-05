@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
 import {IERC721Receiver, MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 
-// Gap row MG-04 (ADV-09), lead L4: claimFees carries no guard while a fill custodies the taker's ETH, and
+// claimFees carries no guard while a fill custodies the taker's ETH, and
 // an owner who is also a party can call it from inside the fill. Every ordering that still holds the taker's
 // ETH reverts as a whole, so nothing of the taker's reaches the recipient. Owner as seller sweeping in
 // receive with an excess to refund: the refund finds no balance, InsufficientPayment. Owner as buyer

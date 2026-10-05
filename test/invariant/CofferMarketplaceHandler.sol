@@ -124,7 +124,7 @@ contract MockWETHForHandler {
 ///         postcondition fails the run with a counterexample. The only silent returns left are
 ///         handler-universe limits (nothing signed yet, nothing to sign for, handler funds), each
 ///         counted so a starved path is visible in the afterInvariant summary.
-/// @dev Contract actor for the strict suite (handler upgrade H-3): an ERC-1271 wallet that validates its owner's
+/// @dev Contract actor for the strict suite: an ERC-1271 wallet that validates its owner's
 ///      key while `authorized`, with a receive mode that decides the listing payout leg and a hook that can
 ///      reject a delivery. It never reverts inside isValidSignature, a reverting check would register as the
 ///      innermost reverting frame.
@@ -220,7 +220,7 @@ contract CofferMarketplaceHandler is Test {
 
     address[] public actors;
     mapping(address => uint256) public actorPk;
-    // Contract actors (handler upgrade H-3): the last three entries of `actors`, their owner key in actorPk
+    // Contract actors: the last three entries of `actors`, their owner key in actorPk
     address[] public wallets;
     mapping(address => bool) public isWallet;
 
@@ -236,7 +236,7 @@ contract CofferMarketplaceHandler is Test {
         uint256 globalNonce;
     }
 
-    // Balances around a listing fill (handler upgrade H-3): both assets of the seller and the marketplace,
+    // Balances around a listing fill: both assets of the seller and the marketplace,
     // the buyer's ETH, and a wallet buyer's hook counter.
     struct BuySnapshot {
         uint256 sellerEth;
@@ -326,11 +326,11 @@ contract CofferMarketplaceHandler is Test {
 
     uint256 public ghostInitialTotalEth;
     uint256 public ghostInitialTotalWeth;
-    // WETH the listing fallback minted by depositing the price: the WETH sum grows by it (handler upgrade H-1)
+    // WETH the listing fallback minted by depositing the price: the WETH sum grows by it
     uint256 public ghostWethMintedByFallback;
 
-    // ──── Ghost State: Fee ledger (handler upgrade H-1) ────
-    // The contract keeps no fee ledger (x-ray I-5): the marketplace's ETH balance must equal the fees of the
+    // ──── Ghost State: Fee ledger ────
+    // The contract keeps no fee ledger: the marketplace's ETH balance must equal the fees of the
     // settled listing fills minus what claimFees swept, its WETH balance the fees of the accepted offers minus
     // what claimWethFees swept.
 
@@ -339,7 +339,7 @@ contract CofferMarketplaceHandler is Test {
     uint256 public ghostWethAccrued;
     uint256 public ghostWethClaimed;
 
-    // ──── Ghost State: Admin mirror (handler upgrade H-1) ────
+    // ──── Ghost State: Admin mirror ────
 
     address public ghostOwner;
     address public ghostPendingOwner;
@@ -363,7 +363,7 @@ contract CofferMarketplaceHandler is Test {
     uint256 public callsWarpTime;
     uint256 public callsSetNonOutstanding;
     uint256 public callsTransferNft;
-    // Handler upgrade H-2
+    // Batch cancels, sweeps, admin, impairment, approval
     uint256 public callsCancelListings;
     uint256 public callsCancelListingsEntries;
     uint256 public callsCancelOffers;
@@ -378,7 +378,7 @@ contract CofferMarketplaceHandler is Test {
     uint256 public callsSetApproval;
     uint256 public skippedAdminThrottled;
     uint256 public skippedAcceptOwnershipNoPending;
-    // Handler upgrade H-3
+    // Contract-wallet actors
     uint256 public callsSetWalletMode;
     uint256 public ghostFallbackPayouts;
     uint256 public ghostWalletFillsSettled;
@@ -558,7 +558,7 @@ contract CofferMarketplaceHandler is Test {
         uint64 expiration = uint64(block.timestamp + bound(expOffset, 1, 365 days));
 
         // The offerer signs off-chain at the predicted nonces. An offerer may sign against its own
-        // bond (the off-chain store cannot stop that) and the accept path then rejects with SameParty.
+        // bond, and the accept path then rejects with SameParty.
         ghostHasSignedOffer[buyer][bondId] = true;
         ghostOfferSignedNonce[buyer][bondId] = ghostOfferNonce[buyer][bondId];
         ghostOfferSignedGlobalNonce[buyer][bondId] = ghostOfferGlobalNonce[buyer];
@@ -647,7 +647,7 @@ contract CofferMarketplaceHandler is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //   Handler upgrade H-2: batch cancels, sweeps, admin, impairment, approval
+    //   Batch cancels, sweeps, admin, impairment, approval
     // ═══════════════════════════════════════════════════════════════
     // Every action predicts its reverts exactly, as the fills do. The admin actions and the batch cancels are
     // throttled to about one call in four like cancelAll, so the fills keep their share of the campaign.
@@ -867,7 +867,7 @@ contract CofferMarketplaceHandler is Test {
         ghostApproved[actor] = approved;
     }
 
-    /// @dev Handler upgrade H-3: a wallet's receive mode, its authorization (off one time in four) and its
+    /// @dev A wallet's receive mode, its authorization (off one time in four) and its
     ///      delivery hook (rejecting one time in four) change mid-campaign, the oracle reads them live.
     function handlerSetWalletMode(uint256 walletSeed, uint8 mode, uint256 authSeed, uint256 hookSeed) external {
         ++callsSetWalletMode;

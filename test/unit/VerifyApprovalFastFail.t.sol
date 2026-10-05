@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
 import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 
-// Durable regression suite for audit finding L-04.
+// Durable regression suite for the approval fast-fail.
 // The buy path now performs the same isApprovedForAll fast-fail as the accept path, and both trade
 // functions run the cheap local checks and the on-chain ownership and approval checks before signature
 // verification. A revoked-approval listing therefore reverts MarketplaceNotApproved early, with a named

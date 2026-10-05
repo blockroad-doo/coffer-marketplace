@@ -248,8 +248,8 @@ contract CofferMarketplaceFeesTest is Test {
 
     // ───── Constants ─────
 
-    /// @notice The rate is published on-chain, so a client computes the fee from the contract
-    ///         rather than from its own copy of the number.
+    /// @notice The rate is published on-chain, so the fee can be computed from the contract
+    ///         rather than from a copy of the number.
     function test_feeBpsConstantIsPublished() public view {
         assertEq(marketplace.FEE_BPS(), 900, "published fee in basis points");
         assertEq(marketplace.BPS_DENOMINATOR(), 10000, "published basis points denominator");
@@ -378,7 +378,7 @@ contract CofferMarketplaceFeesTest is Test {
         marketplace.buySignedListing{value: price}(bondId, seller, price, mat, exp, nonce, 0, sig);
     }
 
-    // ───── Exact-payment boundary (gap row MG-01) ─────
+    // ───── Exact-payment boundary ─────
     //
     // The README publishes price + fee and offerAmount + fee as the requirement. These pin that the published
     // number is exact on both paths: it settles, and one wei less reverts InsufficientPayment. The two checks of

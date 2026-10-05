@@ -68,18 +68,18 @@ contract CofferMarketplaceInvariantTest is Test {
         }
         total += weth.balanceOf(address(marketplace));
         total += weth.balanceOf(feeRecipient);
-        // The listing fallback deposits the price into WETH, which mints (handler upgrade H-1)
+        // The listing fallback deposits the price into WETH, which mints
         assertEq(
             total, handler.ghostInitialTotalWeth() + handler.ghostWethMintedByFallback(), "Total WETH must be conserved"
         );
     }
 
     // ═══════════════════════════════════════════════════════════════
-    //  Category 1b, Fee ledger and admin mirror (handler upgrade H-1)
+    //  Category 1b, Fee ledger and admin mirror
     // ═══════════════════════════════════════════════════════════════
 
     /// @dev The contract keeps no fee ledger, the handler does: every settled fill adds its fee in its own asset,
-    ///      every sweep removes the whole balance of its asset. x-ray row I-5 in the handler-checkable form.
+    ///      every sweep removes the whole balance of its asset.
     function invariant_feeLedger() public view {
         assertEq(address(marketplace).balance, handler.ghostEthAccrued() - handler.ghostEthClaimed(), "ETH fee ledger");
         assertEq(

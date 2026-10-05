@@ -1,7 +1,7 @@
 //SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.34;
 
-// Durable regression for M-01 (offer-path maturity collapse) and its listing-path sibling.
+// Durable regression for the offer-path maturity collapse and its listing-path sibling.
 //
 // The bond maturity observed at signing time is bound into the EIP-712 Listing and Offer structs
 // and re-checked against the live bond maturity at fill. Collapsing a bond's maturity after a
@@ -95,7 +95,7 @@ contract VerifyMaturityBindingTest is Test {
         weth.approve(address(marketplace), type(uint256).max);
     }
 
-    /// @notice M-01 core: the holder (who is also the offer taker) collapses the bond's maturity
+    /// @notice Core case: the holder (who is also the offer taker) collapses the bond's maturity
     ///         after the maker signs, then accepts. The fill reverts instead of making the maker overpay.
     function test_offerPath_maturityCollapse_reverts() public {
         coffer.setMaturityValue(10 ether);

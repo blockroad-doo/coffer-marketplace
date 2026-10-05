@@ -57,14 +57,13 @@ contract Mock7702NoReceiverDelegate {
     receive() external payable {}
 }
 
-// Rows L11, O10 and O12 of marketplace_gaps.md: a maker whose address carries code.
+// A maker whose address carries code.
 //
 // SignatureChecker branches on one fact, signer.code.length == 0 (SignatureChecker.sol:49). An
 // EIP-7702 delegation flips a plain EOA to the other side of that branch after the signature was
-// already made, and whether the old signed messages survive is entirely the delegate's decision. Gap B
-// turns down two cheaper designs, hiding every code-bearing maker's rows and refusing them at intake,
-// on the grounds that the usual delegate validates its owner's ECDSA signature and keeps the rows
-// alive. The accepting-delegate tests below are what make that a result instead of a belief.
+// already made, and whether the old signed messages survive is entirely the delegate's decision. The
+// usual delegate validates its owner's ECDSA signature and keeps them alive. The accepting-delegate
+// tests below are what make that a result instead of a belief.
 //
 /// @dev Answers ERC-1271 and reverts in the receiver hook. Before the fix this was a free veto over
 ///      the maker's own funded bid at inclusion time. Delivery no longer runs the hook.
@@ -193,11 +192,10 @@ contract VerifyDelegatedMakersTest is Test {
         weth.approve(address(marketplace), type(uint256).max);
     }
 
-    // ───── Row L11: the seller's address gains code after listing ─────
+    // ───── The seller's address gains code after listing─────
 
-    // The signature was made by a key and is verified by code, and the code says yes. This is the
-    // case Gap B protects: hiding every code-bearing maker's rows would have killed this listing
-    // for no reason.
+    // The signature was made by a key and is verified by code, and the code says yes, so the
+    // listing stays fillable.
     function test_sellerGainsAcceptingDelegate_listingStillFills() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondA);
@@ -214,8 +212,7 @@ contract VerifyDelegatedMakersTest is Test {
     }
 
     // The same delegation with a delegate that answers nothing. Every signed message this seller ever signed
-    // is dead while the delegation stands, and no event anywhere reports it, which is why Gap B's
-    // cycle re-asks instead of waiting to be told.
+    // is dead while the delegation stands, and no event anywhere reports it.
     function test_sellerGainsSilentDelegate_listingReverts() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(seller, bondA);
@@ -228,7 +225,7 @@ contract VerifyDelegatedMakersTest is Test {
         marketplace.buySignedListing{value: PRICE}(bondA, seller, PRICE, MATURITY, exp, nonce, 0, sig);
     }
 
-    // ───── Row O10: the offer maker's address gains code after signing ─────
+    // ───── The offer maker's address gains code after signing─────
 
     // The offer twin. The delegate answers the signature and receives the bond, so both pieces of
     // maker-controlled code in an accept are exercised in one fill.
