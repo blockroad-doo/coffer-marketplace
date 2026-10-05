@@ -1,6 +1,6 @@
 # Coffer Marketplace
 
-A **permissionless, non-custodial** secondary marketplace for trading [Coffer Bond NFTs](#what-is-a-coffer-bond-nft). Anyone can sign, fill, or cancel listings and offers, and the contract owner's only powers are choosing the fee recipient and sweeping accrued fees. The marketplace never holds user funds or NFTs: assets stay in their owner's wallet until a fill settles through approvals, and the contract's balance carries only accrued protocol fees. Two trading mechanisms are supported: **EIP-712 signed listings** (seller signs off-chain, buyer executes on-chain) and **EIP-712 signed offers** (buyer signs off-chain, seller accepts on-chain). Listings and offers are signed off-chain at no cost, and nothing is recorded on-chain until a fill. The taker fills a signed message on-chain, where the signature is verified at that moment. Both EOA wallets and ERC-1271 contract wallets, such as Safe and ERC-4337 accounts, are supported.
+A **permissionless, non-custodial** secondary marketplace for trading [Coffer Bond NFTs](#coffer-bond-nft). Anyone can sign, fill, or cancel listings and offers, and the contract owner's only powers are choosing the fee recipient and sweeping accrued fees. The marketplace never holds user funds or NFTs. Assets stay in their owner's wallet until a fill settles through approvals, and the contract's balance carries only accrued protocol fees. It supports two trading mechanisms, **EIP-712 signed listings** (seller signs off-chain, buyer executes on-chain) and **EIP-712 signed offers** (buyer signs off-chain, seller accepts on-chain). Listings and offers are signed off-chain at no cost, and nothing is recorded on-chain until a fill. The taker fills a signed message on-chain, where the signature is verified at that moment. Both EOA wallets and ERC-1271 contract wallets, such as Safe and ERC-4337 accounts, are supported. An EOA that carries an EIP-7702 delegation is verified as a contract wallet.
 
 Built with Solidity 0.8.34, [Foundry](https://book.getfoundry.sh/), and OpenZeppelin (`Ownable2Step`, `ReentrancyGuard`, `SafeERC20`, `Address`, `EIP712`, `SignatureChecker`).
 
@@ -8,9 +8,9 @@ Built with Solidity 0.8.34, [Foundry](https://book.getfoundry.sh/), and OpenZepp
 
 ---
 
-## What is a Coffer Bond NFT?
+## Coffer Bond NFT
 
-A Coffer Bond NFT is an ERC-721 token representing a fixed-income bond from a validator. When a holder sends ETH to a Coffer (validator) contract, they receive an NFT encoding:
+A Coffer Bond NFT is an ERC-721 token representing a fixed-income bond from a validator. When a holder buys a bond with `buyBond` on a Coffer (validator) contract, they receive an NFT, and the Coffer records three values for it:
 
 - **Maturity value.** The ETH amount owed at maturity.
 - **Duration.** The bond term in seconds.
@@ -72,7 +72,7 @@ The ETH payout forwards at most `SELLER_PAYOUT_GAS_LIMIT` (100,000) gas to the s
 
 ### Fee Flow
 
-- **Rate.** `FEE_BPS`, 900 basis points, of the profit: the maturity value minus the price (listing) or the offer amount (offer), when positive. A trade at or above the maturity value pays no fee. The rate is a compile-time constant and cannot be changed.
+- **Rate.** `FEE_BPS`, 900 basis points, of the profit. The profit is the maturity value minus the price (listing) or the offer amount (offer), when positive. A trade at or above the maturity value pays no fee. The rate is a compile-time constant and cannot be changed.
 - **ETH fees** accumulate in the marketplace's native balance, exclusively from `buySignedListing`. They are claimed via `claimFees()`.
 - **WETH fees** accumulate in the marketplace's WETH balance, exclusively from `acceptSignedOffer`. They are claimed via `claimWethFees()`.
 - Both claim functions are `onlyOwner` and send to `sFeeRecipient`.
@@ -80,7 +80,7 @@ The ETH payout forwards at most `SELLER_PAYOUT_GAS_LIMIT` (100,000) gas to the s
 
 ### Protections
 
-- **EIP-712 signature integrity.** Every field in a listing or offer is cryptographically bound to the signer. Changing any parameter invalidates the signature, which eliminates the need for `_expectedPrice` and `_expectedAmount` front-running guards. Signatures are verified with OpenZeppelin `SignatureChecker`, so both EOA signatures and ERC-1271 contract-wallet signatures (Safe, ERC-4337) are accepted. Contract-wallet validity is checked at fill time, so a wallet that revokes its authorization after signing correctly fails at the fill. The maker's address is the first field of both structs, so a signature verifies for the account it names and no other, a contract wallet that validates against the same key as an EOA included.
+- **EIP-712 signature integrity.** Every field in a listing or offer is cryptographically bound to the signer. Changing any parameter invalidates the signature, so a taker needs no extra guard against terms that change before the fill lands. Signatures are verified with OpenZeppelin `SignatureChecker`, so both EOA signatures and ERC-1271 contract-wallet signatures (Safe, ERC-4337) are accepted. Contract-wallet validity is checked at fill time, so a wallet that revokes its authorisation after signing correctly fails at the fill. The maker's address is the first field of both structs, so a signature verifies for the account it names and no other, a contract wallet that validates against the same key as an EOA included.
 - **Maturity value binding.** The signed `maturityValue` is re-checked against the bond's live maturity value at fill. If the bond changed after signing, the fill reverts `MaturityValueMismatch`. This binds the committed price to the bond value the maker signed against.
 - **Nonce-based replay protection.** Each listing and offer is signed at the current per-bond per-user nonce. After a successful trade, the maker's nonce for that bond and side is auto-incremented, which prevents the same signature from being reused. Cancellation works by bumping the nonce, which renders all previous signatures for that bond invalid.
 - **Two-tier nonce system.** Per-bond nonces handle single and batch cancellation. A global nonce per user enables cancel-all, where one transaction invalidates every listing or offer for that user.
@@ -106,8 +106,20 @@ The ETH payout forwards at most `SELLER_PAYOUT_GAS_LIMIT` (100,000) gas to the s
 ## Getting Started
 
 ```bash
+# Libraries (git submodules)
+git submodule update --init --recursive
+
+# Lint tooling
+npm ci
+
 # Compile
 forge build
+
+# Unit tests
+forge test
+
+# Invariant suite
+FOUNDRY_PROFILE=invariants forge test
 
 # Lint (format check + solhint)
 make lint
@@ -129,7 +141,7 @@ Listing(address seller,uint256 bondId,uint128 price,uint128 maturityValue,uint64
 Offer(address buyer,uint256 bondId,uint128 wethAmount,uint128 maturityValue,uint64 expiration,uint256 nonce,uint256 globalNonce)
 ```
 
-The signed `maturityValue` must equal the bond's live maturity (`getBondData(bondId)` returns it) at the moment of signing. It is re-checked on-chain at fill against the live value: if the bond's maturity changed after signing, for example because the holder partially withdrew, the fill reverts `MaturityValueMismatch`. This binds the price the maker committed to the bond value they signed against, so a counterparty cannot collapse the bond and still settle. A maker signs the current maturity value and signs again whenever it changes.
+The signed `maturityValue` must equal the bond's live maturity value (`getBondData(bondId)` returns it) at the moment of signing. It is re-checked on-chain at fill against the live value. If the bond's maturity value changed after signing, for example because the holder partially withdrew, the fill reverts `MaturityValueMismatch`. This binds the price the maker committed to the bond value they signed against, so a counterparty cannot collapse the bond and still settle. A maker signs the current maturity value and signs again whenever it changes.
 
 ### Assessing a bond before quoting a price
 
@@ -137,8 +149,8 @@ The maturity value binds the **size** of a claim, not its **quality**. A fill ch
 
 Two separate questions decide the price, whether the bond is covered and whether the Coffer is serving. They are often read as one and they are not.
 
-- **Coverage is set by the terms, and checking them is the buyer's job.** A bond rests on the validator's backing, the Coffer's balance plus the validator's stake on the consensus layer. What the Coffer can owe is the maturity value of every outstanding bond plus the `issueSize` still unsold, which the validator can sell at any moment, and `issueSizeBufferBps` is the margin the validator keeps between that sum and the stake. A bond bought while that sum sits inside the backing with the buffer to spare is covered, and its ETH exists throughout, on the consensus layer until the validator withdraws it and on the Coffer once it does. Penalties inside the buffer leave it covered. Only penalties beyond the buffer, or a network-wide event that no buffer prevents, can leave it partly or fully uncovered. The contract enforces none of this, because it never reads the consensus layer. A buyer who takes a bond whose promises already exceed the backing, or whose buffer is thin for the bond's duration, holds an uncovered bond by not checking the terms, and no later event on the Coffer made it so. Read `issueSize` and `issueSizeBufferBps` from `sValidatorConditions()`, the balance from the Coffer itself, and the stake from the beacon chain, which no contract can read.
-- **A default is a serving failure at the contract, not a coverage verdict.** `validatorDefaulted` is set when a matured bond could not be paid from the Coffer's balance, either by anyone calling `declareDefault` or atomically by the holder's `holderRedeemBondOrDefault`. It says the validator did not bring the ETH to the contract in time. It says nothing about the backing. A covered Coffer can default because its validator is late, or gone, with the stake still on the consensus layer, and an uncovered Coffer can serve every maturity for as long as its balance lasts. The default accelerates every bond to its full maturity value, claimable at once, first come first served from the balance, and anyone can call `exitValidator()` repeatedly while any bond is outstanding to sweep the validator's remaining stake into the balance. On a covered Coffer that sweep pays every claim in full, and the open question is how long the exit takes to land. On an uncovered Coffer the order of claims decides who is paid, and a distressed bond there is a buy-and-act position: its worth is the balance, the stake still in transit, and how fast the new owner claims. The flag clears only when the validator calls `clearDefault()` after every bond has been settled at its full maturity value, at which point bond sales and new bonds can resume.
+- **Coverage is set by the terms, and checking them is the buyer's job.** A bond rests on the validator's backing, the Coffer's balance plus the validator's stake on the consensus layer. What the Coffer can owe is the maturity value of every outstanding bond plus the `issueSize` still unsold, which the validator can sell at any moment, and `issueSizeBufferBps` is the margin the validator keeps between that sum and the stake. A bond bought while that sum sits inside the backing with the buffer to spare is covered, and its ETH exists throughout, on the consensus layer until the validator withdraws it and on the Coffer once it does. Penalties inside the buffer leave it covered. Only penalties beyond the buffer, or a network-wide event that no buffer prevents, can leave it partly or fully uncovered. The contract enforces none of this, because it never reads the consensus layer. A buyer who takes a bond whose promises already exceed the backing, or whose buffer is thin for the bond's duration, holds an uncovered bond by not checking the terms, and no later event on the Coffer made it so. Read `issueSize` and `issueSizeBufferBps` from `sValidatorConditions()`, the balance from the Coffer itself, and the stake from the beacon chain, which neither the Coffer nor the marketplace reads.
+- **A default is a serving failure at the contract, not a coverage verdict.** `validatorDefaulted` is set when a matured bond could not be paid from the Coffer's balance, either by anyone calling `declareDefault` or atomically by the holder's `holderRedeemBondOrDefault`. It says the validator did not bring the ETH to the contract in time. It says nothing about the backing. A covered Coffer can default because its validator is late, or gone, with the stake still on the consensus layer, and an uncovered Coffer can serve every maturity for as long as its balance lasts. The default accelerates every bond to its full maturity value, claimable at once, first come first served from the balance, and anyone can call `exitValidator()` repeatedly while any bond is outstanding to sweep the validator's remaining stake into the balance. On a covered Coffer that sweep pays every claim in full, and the open question is how long the exit takes to land. On an uncovered Coffer the order of claims decides who is paid, and a distressed bond there is a buy-and-act position. Its worth is the balance, the stake still in transit, and how fast the new owner claims. The flag clears only when the validator calls `clearDefault()` after every bond has been settled at its full maturity value, at which point bond sales and the validator's withdrawals can resume.
 - **The Coffer balance** is what a claim can draw on right now. It decides whether the next maturity is served, not whether the bond is covered. A Coffer whose validator is still staked holds only a fraction of what its outstanding bonds are worth. The validator tops the balance up before each maturity, and consensus-layer payouts arrive with no event and no log, so watch the balance itself rather than waiting for events.
 
 Read `validatorDefaulted` from `sValidatorConditions()` **by field name**, using the full Coffer ABI. Never read a struct value by its tuple position. A position can change its meaning across contract versions without any error, and a read by name fails loudly instead of returning a wrong answer.
@@ -149,13 +161,13 @@ Three consequences worth pricing in:
 - A partial claim does not fail. It lowers the bond's maturity value by the amount paid and leaves the bond live for the remainder, which also invalidates any listing or offer signed against the old value. In a defaulted Coffer this is routine rather than rare, so re-quote all of a Coffer's bonds when `ValidatorDefaulted` fires and keep expirations short on distressed listings.
 - Maturity dates stop mattering after a default. An immature bond in a defaulted Coffer claims exactly like a matured one.
 
-A matured bond stays outstanding until someone settles it. The holder pulls the payment through `holderRedeemBondOrDefault`, and when the holder never claims, `validatorRedeemBonds` is the validator's only way to settle the bond without them, because an unclaimed matured bond keeps `outstandingBonds` above zero and blocks every restricted parameter change on the Coffer. A listed bond past its maturity can therefore be zeroed by the validator at any moment, so treat it like a distressed listing and keep its expiration short.
+A matured bond stays outstanding until someone settles it. The holder pulls the payment through `holderRedeemBondOrDefault`, and when the holder never claims, `validatorRedeemBonds` is the validator's only way to settle the bond without them, because an unclaimed matured bond keeps `outstandingBonds` above zero and blocks every restricted parameter change on the Coffer. The validator can zero a listed bond at any moment, before maturity as well, and a bond past its maturity is the likeliest case. Treat such a listing like a distressed one and keep its expiration short.
 
 ### Selling via Listing
 
 ```
 1. Seller: cofferBondNft.setApprovalForAll(marketplace, true)
-2. Seller: signTypedData(marketplace, Listing(seller, bondId, price, maturityValue, expiration, nonce, globalNonce))   (nonce = current sListingNonce, maturityValue = current getBondData(bondId) maturity)
+2. Seller: signTypedData(marketplace, Listing(seller, bondId, price, maturityValue, expiration, nonce, globalNonce))   (nonce = current sListingNonce, maturityValue = current getBondData(bondId) maturity value)
 3. Seller: pass the signed listing to buyers (off-chain, no gas)
 4. Buyer:  marketplace.buySignedListing(bondId, seller, price, maturityValue, expiration, nonce, globalNonce, sig)   {value: price + buyFee}
 ```
@@ -164,7 +176,7 @@ A matured bond stays outstanding until someone settles it. The holder pulls the 
 
 ```
 1. Buyer:  weth.approve(marketplace, offerAmount + expectedFee)
-2. Buyer:  signTypedData(marketplace, Offer(buyer, bondId, wethAmount, maturityValue, expiration, nonce, globalNonce))   (nonce = current sOfferNonce, maturityValue = current getBondData(bondId) maturity)
+2. Buyer:  signTypedData(marketplace, Offer(buyer, bondId, wethAmount, maturityValue, expiration, nonce, globalNonce))   (nonce = current sOfferNonce, maturityValue = current getBondData(bondId) maturity value)
 3. Buyer:  pass the signed offer to the bond's owner (off-chain, no gas)
 4. Seller: cofferBondNft.setApprovalForAll(marketplace, true)
 5. Seller: marketplace.acceptSignedOffer(bondId, buyer, wethAmount, maturityValue, expiration, nonce, globalNonce, sig)
@@ -213,8 +225,8 @@ One limit is worth stating plainly. A maker's code can behave during a simulatio
 ### Risk Factors
 
 - **Pre-signed nonce queues.** Listings and offers signed ahead of the current on-chain nonce arm one by one as fills and cancels advance it. The recovery procedure under Nonce Rules clears the whole queue in one transaction.
-- **Stale signatures.** A signed listing or offer stays fillable until it expires or the maker cancels on-chain, and re-signing off-chain does not revoke it. Short expirations bound how long a stale signature can linger. A fill retires the maker's message on the filled side only. Buying a bond does not retire your own offer on it, and selling a bond does not retire your own listing on it, so cancel that message on-chain before you trade the bond the other way. Revoking the marketplace approval stops your listings from filling but does not cancel them, and approving the marketplace again makes every one of them fillable at its signed price. If you revoke and later return, cancel your listings on-chain with `cancelAllListings()` before you approve the marketplace again. When your wallet rejects ETH, a listing sale pays you in WETH through the fallback, and that WETH can fund your own old bids, which a taker can then fill in the same transaction. So before you list from such a wallet, cancel on-chain every bid you no longer want. A bid that your WETH balance or allowance no longer covers cannot fill, but it stays valid. Anyone can send you the missing WETH and fill the bid in the same transaction, and a zero allowance holds your bids back only until you approve the marketplace again. To stop a bid, cancel it on-chain.
-- **Bond invalidation after signing.** A bond's maturity value can change after a listing or offer is signed, through a holder redemption after maturity, a validator redemption before or after maturity, or a claim in a defaulted Coffer, which is the one path that can lower the value without zeroing it. Fills against the old value revert `MaturityValueMismatch`, or `BondNotOutstanding` once the value is zeroed, and the maker must sign again against the live value.
+- **Stale signatures.** A signed listing or offer stays fillable until it expires or the maker cancels on-chain, and re-signing off-chain does not revoke it. Short expirations bound how long a stale signature can linger. A fill retires the maker's message on the filled side only. Buying a bond does not retire your own offer on it, and selling a bond does not retire your own listing on it, so cancel that message on-chain before you trade the bond the other way. Revoking the marketplace approval stops your listings from filling but does not cancel them, and approving the marketplace again makes every one of them fillable at its signed price. If you revoke and later return, cancel your listings on-chain with `cancelAllListings()` before you approve the marketplace again. An EIP-7702 delegation changes how your signatures are checked. While your address carries code, the marketplace asks that code through ERC-1271. A delegate that does not answer makes every message you signed fail, and removing the delegation makes them fillable again. A delegation cancels nothing. To stop a message, cancel it on-chain. When your wallet rejects ETH, a listing sale pays you in WETH through the fallback, and that WETH can fund your own old offers, which a taker can then fill in the same transaction. So before you list from such a wallet, cancel on-chain every offer you no longer want. An offer that your WETH balance or allowance no longer covers cannot fill, but it stays valid. Anyone can send you the missing WETH and fill the offer in the same transaction, and a zero allowance holds your offers back only until you approve the marketplace again. To stop an offer, cancel it on-chain.
+- **Bond invalidation after signing.** A bond's maturity value can change after a listing or offer is signed, through a holder redemption after maturity, a validator redemption before or after maturity, or a claim in a defaulted Coffer, which is the one path that can lower the value without zeroing it. A fill against a lowered value reverts `MaturityValueMismatch`, and the maker must sign again against the live value. A fill of a settled bond reverts `ERC721NonexistentToken` inside `ownerOf`, because every full settlement burns the NFT, so `BondNotOutstanding` is never reached with the real Coffer.
 - **Maker-controlled code in a fill.** A contract wallet's signature check runs with the taker's gas. A listing or offer can be written so that every fill attempt burns that gas and then fails, leaving it live. No funds move and no fill settles on terms the taker did not agree to. See Maker-controlled code and the taker's gas.
 - **Default and impairment.** Equal maturity values do not mean equal assets. A default lands when a matured bond cannot be paid, either through `declareDefault` or atomically through the holder's `holderRedeemBondOrDefault`, and while it stands a defaulted Coffer pays first come first served from whatever balance and swept stake it has, so late claimants can be paid partially or not at all. After every bond is settled at full value the validator can clear the default with `clearDefault()` and resume operations. Check `validatorDefaulted` and the Coffer balance before quoting, see Assessing a bond before quoting a price.
 
