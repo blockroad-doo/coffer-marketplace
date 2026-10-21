@@ -58,7 +58,7 @@ A bond is considered **outstanding** while its `bondMaturityValue != 0`. The mar
 
 ### Listings (ETH)
 
-1. Seller signs an EIP-712 `Listing(seller, bondId, price, maturityValue, expiration, nonce, globalNonce)` message with their wallet, using the current on-chain per-bond nonce. Signing costs nothing.
+1. Seller signs an EIP-712 `Listing(seller, bondId, price, maturityValue, expiration, nonce, globalNonce)` message with their wallet, using the current on-chain per-bond nonce (`sListingNonce`) and the current global nonce (`sGlobalListingNonce`). Signing costs nothing.
 2. The seller passes the signed listing to buyers off-chain. There is no on-chain registration step.
 3. Buyer calls `buySignedListing()` passing the listing parameters and the seller's signature. The contract rejects self-trades and a zero price, checks the signed per-bond and global nonces against the current ones, checks the seller still owns the bond and has the marketplace approved, checks the listing is unexpired, verifies the signature against the seller, checks the bond is outstanding and that the signed `maturityValue` equals the bond's live maturity value (reverting `MaturityValueMismatch` otherwise), computes the profit-based fee (profit is the maturity value minus the price when positive, fee is `profit * FEE_BPS / BPS_DENOMINATOR`), requires the sent ETH to cover price plus fee, bumps the nonce to prevent replay, and executes the trade. The NFT goes to the buyer, the ETH price goes to the seller (with a WETH deposit and transfer fallback if the seller rejects ETH), the fee stays in the marketplace, and excess ETH is refunded to the buyer. A fill at the expiration second still settles, one second later it reverts `ExpirationNotInFuture`. When the expiration equals the bond's maturity, that second is also the first second in which the bond pays its full maturity value, so a buyer can fill the listing at the seller's price and redeem the bond in the same transaction.
 
@@ -66,7 +66,7 @@ The ETH payout forwards at most `SELLER_PAYOUT_GAS_LIMIT` (100,000) gas to the s
 
 ### Offers (WETH)
 
-1. Buyer signs an EIP-712 `Offer(buyer, bondId, wethAmount, maturityValue, expiration, nonce, globalNonce)` message at the current on-chain per-bond nonce. Signing costs nothing.
+1. Buyer signs an EIP-712 `Offer(buyer, bondId, wethAmount, maturityValue, expiration, nonce, globalNonce)` message at the current on-chain per-bond nonce (`sOfferNonce`) and the current global nonce (`sGlobalOfferNonce`). Signing costs nothing.
 2. The buyer passes the signed offer to the bond's owner off-chain. There is no on-chain registration step, and the contract does not check the WETH balance or allowance until acceptance.
 3. Seller calls `acceptSignedOffer()` passing the offer parameters and the buyer's signature. The contract rejects self-trades and a zero amount, checks the signed per-bond and global nonces against the current ones, requires the caller to own the bond and have the marketplace approved, checks the offer is unexpired, verifies the signature against the buyer, checks the bond is outstanding and that the signed `maturityValue` equals the bond's live maturity value (reverting `MaturityValueMismatch` otherwise), computes the WETH fee at the constant rate, bumps the nonce to prevent replay, then verifies the buyer has sufficient WETH balance and allowance and executes the trade. The WETH amount goes from buyer to seller, the WETH fee goes from buyer to the marketplace, and the NFT transfers from seller to buyer with `transferFrom`, without the receiver hook, since the signed offer that names the bond is the buyer's consent.
 
@@ -90,7 +90,7 @@ The ETH payout forwards at most `SELLER_PAYOUT_GAS_LIMIT` (100,000) gas to the s
 
 ### Restrictions
 
-- **One open listing or offer per bond.** The nonce design supports exactly one live signed message per maker and bond on each side. Pre-signing several consecutive nonces for the same bond arms the next pre-signed one on every fill or cancel, so a cancel can sell at the next pre-signed price. A maker signs only at the current on-chain nonce. See Nonce Rules under Cancelling for the recovery procedure.
+- **One open listing or offer per bond.** The nonce design supports exactly one live signed message per maker and bond on each side. Pre-signing several consecutive nonces for the same bond arms the next pre-signed one on every fill, so a maker signs only at the current on-chain nonces. One cancel of that bond revokes every message signed ahead, see Nonce Rules under Cancelling.
 - **Revocation is on-chain only.** A listing or offer is revoked by an on-chain cancel that bumps the nonce. Re-signing off-chain at the same nonce does not revoke the previous signature, so to withdraw a signed message or raise its price a maker cancels on-chain. Short expirations bound how long a stale signature can linger.
 
 ---
@@ -167,7 +167,7 @@ A matured bond stays outstanding until someone settles it. The holder pulls the 
 
 ```
 1. Seller: cofferBondNft.setApprovalForAll(marketplace, true)
-2. Seller: signTypedData(marketplace, Listing(seller, bondId, price, maturityValue, expiration, nonce, globalNonce))   (nonce = current sListingNonce, maturityValue = current getBondData(bondId) maturity value)
+2. Seller: signTypedData(marketplace, Listing(seller, bondId, price, maturityValue, expiration, nonce, globalNonce))   (nonce = current sListingNonce, globalNonce = current sGlobalListingNonce, maturityValue = current getBondData(bondId) maturity value)
 3. Seller: pass the signed listing to buyers (off-chain, no gas)
 4. Buyer:  marketplace.buySignedListing(bondId, seller, price, maturityValue, expiration, nonce, globalNonce, sig)   {value: price + buyFee}
 ```
@@ -176,7 +176,7 @@ A matured bond stays outstanding until someone settles it. The holder pulls the 
 
 ```
 1. Buyer:  weth.approve(marketplace, offerAmount + expectedFee)
-2. Buyer:  signTypedData(marketplace, Offer(buyer, bondId, wethAmount, maturityValue, expiration, nonce, globalNonce))   (nonce = current sOfferNonce, maturityValue = current getBondData(bondId) maturity value)
+2. Buyer:  signTypedData(marketplace, Offer(buyer, bondId, wethAmount, maturityValue, expiration, nonce, globalNonce))   (nonce = current sOfferNonce, globalNonce = current sGlobalOfferNonce, maturityValue = current getBondData(bondId) maturity value)
 3. Buyer:  pass the signed offer to the bond's owner (off-chain, no gas)
 4. Seller: cofferBondNft.setApprovalForAll(marketplace, true)
 5. Seller: marketplace.acceptSignedOffer(bondId, buyer, wethAmount, maturityValue, expiration, nonce, globalNonce, sig)
@@ -199,12 +199,12 @@ marketplace.cancelAllOffers()             (cancel all offers)
 
 #### Nonce Rules
 
-A fill requires the signed nonce to equal the current on-chain nonce, and every fill or per-bond cancel advances that nonce by exactly one. This gives a maker a small set of hard rules.
+A fill requires the signed nonces to equal the current on-chain values. A fill advances the per-bond nonce by one. A cancel raises its nonce by one plus an amount that depends on the block in which it runs, so a value signed ahead of a cancel is not the value the cancel sets. This gives a maker a small set of hard rules.
 
-- **Signing rule.** A maker signs only at the current on-chain nonce (`sListingNonce(maker, bondId)` or `sOfferNonce(maker, bondId)`) and keeps at most one open signed message per bond and side. A maker never signs nonce N+1 while their nonce N signature is still open. Pre-signing the next nonce means a later cancel or fill arms it at its signed price.
+- **Signing rule.** A maker signs only at the current on-chain nonces (`sListingNonce(maker, bondId)` and `sGlobalListingNonce(maker)` for a listing, `sOfferNonce(maker, bondId)` and `sGlobalOfferNonce(maker)` for an offer) and keeps at most one open signed message per bond and side. A maker never signs nonce N+1 while their nonce N signature is still open, because a fill of N arms N+1 at its signed price.
 - **Same-nonce rule.** Signing again at the same nonce does not revoke the earlier signature. Both verify, so raising a price requires an on-chain cancel first. The maker, the bond, the side and the nonce identify a signed message. The signature bytes do not, because an ERC-1271 contract wallet can produce more than one valid signature for the same message.
 - **Independence of bonds.** Per-bond cancels touch only that bond. A maker with offers on bond A and bond B cancels A with `cancelOffer(A)` and the offer on B stays live. `cancelAllOffers()` kills every offer on every bond for that maker, use it only as the deliberate sweep. Listings behave the same way.
-- **Recovery from a pre-signed queue.** If a maker violated the signing rule and pre-signed k consecutive nonces for one bond, a single cancel only advances the nonce by one and arms the next pre-signed listing. The maker clears the whole queue in one transaction by repeating the bond id, for example `cancelListings([A, A])` for k = 2, or the bond id repeated k times in general. The nonce advances past every pre-signed value atomically, with no window in which the next one is fillable, and no other bond is touched. `cancelOffers` works the same for offers.
+- **Recovery from a pre-signed queue.** If a maker signed ahead of the current nonce for one bond, one cancel of that bond revokes the whole queue, because the cancel moves the nonce past every value that was predictable when the queue was signed. `cancelListing(bondId)` or `cancelOffer(bondId)` is enough, and no other bond is touched.
 - **After every cancel or fill.** A signed message whose per-bond or global nonce is below the current on-chain value can never fill. `sListingNonce`, `sGlobalListingNonce`, `sOfferNonce` and `sGlobalOfferNonce` give the current values, and the cancel and trade events report every change.
 
 ### Maker-controlled code and the taker's gas
@@ -224,7 +224,7 @@ One limit is worth stating plainly. A maker's code can behave during a simulatio
 
 ### Risk Factors
 
-- **Pre-signed nonce queues.** Listings and offers signed ahead of the current on-chain nonce arm one by one as fills and cancels advance it. The recovery procedure under Nonce Rules clears the whole queue in one transaction.
+- **Pre-signed nonce queues.** Listings and offers signed ahead of the current on-chain nonce arm one by one as fills advance it. One cancel of the bond revokes the whole queue, see Nonce Rules.
 - **Stale signatures.** A signed listing or offer stays fillable until it expires or the maker cancels on-chain, and re-signing off-chain does not revoke it. Short expirations bound how long a stale signature can linger. A fill retires the maker's message on the filled side only. Buying a bond does not retire your own offer on it, and selling a bond does not retire your own listing on it, so cancel that message on-chain before you trade the bond the other way. Revoking the marketplace approval stops your listings from filling but does not cancel them, and approving the marketplace again makes every one of them fillable at its signed price. If you revoke and later return, cancel your listings on-chain with `cancelAllListings()` before you approve the marketplace again. An EIP-7702 delegation changes how your signatures are checked. While your address carries code, the marketplace asks that code through ERC-1271. A delegate that does not answer makes every message you signed fail, and removing the delegation makes them fillable again. A delegation cancels nothing. To stop a message, cancel it on-chain. When your wallet rejects ETH, a listing sale pays you in WETH through the fallback, and that WETH can fund your own old offers, which a taker can then fill in the same transaction. So before you list from such a wallet, cancel on-chain every offer you no longer want. An offer that your WETH balance or allowance no longer covers cannot fill, but it stays valid. Anyone can send you the missing WETH and fill the offer in the same transaction, and a zero allowance holds your offers back only until you approve the marketplace again. To stop an offer, cancel it on-chain.
 - **Bond invalidation after signing.** A bond's maturity value can change after a listing or offer is signed, through a holder redemption after maturity, a validator redemption before or after maturity, or a claim in a defaulted Coffer, which is the one path that can lower the value without zeroing it. A fill against a lowered value reverts `MaturityValueMismatch`, and the maker must sign again against the live value. A fill of a settled bond reverts `ERC721NonexistentToken` inside `ownerOf`, because every full settlement burns the NFT, so `BondNotOutstanding` is never reached with the real Coffer.
 - **Maker-controlled code in a fill.** A contract wallet's signature check runs with the taker's gas. A listing or offer can be written so that every fill attempt burns that gas and then fails, leaving it live. No funds move and no fill settles on terms the taker did not agree to. See Maker-controlled code and the taker's gas.

@@ -304,36 +304,52 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         require(SignatureChecker.isValidSignatureNowCalldata(_signer, digest, _sig), InvalidSignature());
     }
 
+    // ───── Internal: Nonce Step ─────
+
+    /// @notice The nonce after a cancel, the current nonce plus one plus the top 128 bits of a hash of
+    ///         the caller, block.prevrandao and the current nonce
+    /// @dev The step is at least one, so the nonce only grows, and at most 2^128, so it doesn't overflow in practice
+    /// @param _nonce The current nonce
+    /// @return The nonce after the cancel
+    function _nextNonce(uint256 _nonce) internal view returns (uint256) {
+        // forge-lint: disable-next-line(weak-prng) the step only has to be unknown when a maker signs
+        return _nonce + 1 + (uint256(keccak256(abi.encode(msg.sender, block.prevrandao, _nonce))) >> 128);
+    }
+
     // ───── Listing Functions ─────
 
-    /// @notice Cancel a single bond listing by bumping the per-bond nonce
-    /// @dev Advances the nonce by exactly one. If the seller has pre-signed a listing at the next
-    ///      nonce, that listing becomes fillable. Sign only at the current on-chain nonce.
+    /// @notice Cancel a single bond listing by moving the per-bond nonce
+    /// @dev Raises the nonce by one plus an unpredictable amount, see _nextNonce, so a listing signed at
+    ///      any later nonce is revoked too. Sign only at the current on-chain nonces.
     /// @param _bondId The bond token ID to cancel
     function cancelListing(uint256 _bondId) external {
-        uint256 newNonce = ++sListingNonce[msg.sender][_bondId];
+        uint256 newNonce = _nextNonce(sListingNonce[msg.sender][_bondId]);
+        sListingNonce[msg.sender][_bondId] = newNonce;
         emit ListingCancelled(msg.sender, _bondId, newNonce);
     }
 
     /// @notice Cancel multiple bond listings in one transaction
-    /// @dev Passing the same bond id k times advances that bond's nonce by k atomically, which clears
-    ///      a queue of k pre-signed listings for that bond without affecting other bonds.
+    /// @dev Each entry moves that bond's nonce as cancelListing does. A repeated bond id moves its nonce
+    ///      once more.
     /// @param _bondIds The bond token IDs to cancel
     function cancelListings(uint256[] calldata _bondIds) external {
         uint256 length = _bondIds.length;
         uint256[] memory newNonces = new uint256[](length);
         for (uint256 i = 0; i < length; ++i) {
+            uint256 newNonce = _nextNonce(sListingNonce[msg.sender][_bondIds[i]]);
             // forge-lint: disable-next-line(costly-loop)
-            newNonces[i] = ++sListingNonce[msg.sender][_bondIds[i]];
+            sListingNonce[msg.sender][_bondIds[i]] = newNonce;
+            newNonces[i] = newNonce;
         }
         emit ListingsCancelled(msg.sender, _bondIds, newNonces);
     }
 
-    /// @notice Cancel ALL active listings for the caller by bumping the global nonce
-    /// @dev Invalidates every outstanding listing signature across all bonds, the safe sweep when a
-    ///      seller is unsure what is still signed.
+    /// @notice Cancel ALL active listings for the caller by moving the global nonce
+    /// @dev Invalidates every outstanding listing signature across all bonds, including one signed at a
+    ///      later global nonce.
     function cancelAllListings() external {
-        uint256 newGlobalNonce = ++sGlobalListingNonce[msg.sender];
+        uint256 newGlobalNonce = _nextNonce(sGlobalListingNonce[msg.sender]);
+        sGlobalListingNonce[msg.sender] = newGlobalNonce;
         emit AllListingsCancelled(msg.sender, newGlobalNonce);
     }
 
@@ -389,34 +405,38 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
 
     // ───── Offer Functions ─────
 
-    /// @notice Cancel a single offer by bumping the per-bond nonce
-    /// @dev Advances the nonce by exactly one. If the buyer has pre-signed an offer at the next
-    ///      nonce, that offer becomes fillable. Sign only at the current on-chain nonce.
+    /// @notice Cancel a single offer by moving the per-bond nonce
+    /// @dev Raises the nonce by one plus an unpredictable amount, see _nextNonce, so an offer signed at
+    ///      any later nonce is revoked too. Sign only at the current on-chain nonces.
     /// @param _bondId The bond token ID
     function cancelOffer(uint256 _bondId) external {
-        uint256 newNonce = ++sOfferNonce[msg.sender][_bondId];
+        uint256 newNonce = _nextNonce(sOfferNonce[msg.sender][_bondId]);
+        sOfferNonce[msg.sender][_bondId] = newNonce;
         emit OfferCancelled(msg.sender, _bondId, newNonce);
     }
 
     /// @notice Cancel multiple offers in one transaction
-    /// @dev Passing the same bond id k times advances that bond's nonce by k atomically, which clears
-    ///      a queue of k pre-signed offers for that bond without affecting other bonds.
+    /// @dev Each entry moves that bond's nonce as cancelOffer does. A repeated bond id moves its nonce
+    ///      once more.
     /// @param _bondIds The bond token IDs to cancel
     function cancelOffers(uint256[] calldata _bondIds) external {
         uint256 length = _bondIds.length;
         uint256[] memory newNonces = new uint256[](length);
         for (uint256 i = 0; i < length; ++i) {
+            uint256 newNonce = _nextNonce(sOfferNonce[msg.sender][_bondIds[i]]);
             // forge-lint: disable-next-line(costly-loop)
-            newNonces[i] = ++sOfferNonce[msg.sender][_bondIds[i]];
+            sOfferNonce[msg.sender][_bondIds[i]] = newNonce;
+            newNonces[i] = newNonce;
         }
         emit OffersCancelled(msg.sender, _bondIds, newNonces);
     }
 
-    /// @notice Cancel ALL active offers for the caller by bumping the global nonce
-    /// @dev Invalidates every outstanding offer signature across all bonds, the safe sweep when a
-    ///      buyer is unsure what is still signed.
+    /// @notice Cancel ALL active offers for the caller by moving the global nonce
+    /// @dev Invalidates every outstanding offer signature across all bonds, including one signed at a
+    ///      later global nonce.
     function cancelAllOffers() external {
-        uint256 newGlobalNonce = ++sGlobalOfferNonce[msg.sender];
+        uint256 newGlobalNonce = _nextNonce(sGlobalOfferNonce[msg.sender]);
+        sGlobalOfferNonce[msg.sender] = newGlobalNonce;
         emit AllOffersCancelled(msg.sender, newGlobalNonce);
     }
 

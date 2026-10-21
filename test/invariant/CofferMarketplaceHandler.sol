@@ -257,13 +257,14 @@ contract CofferMarketplaceHandler is Test {
         uint256 globalNonce;
     }
 
-    // ──── Ghost State: Nonces (PREDICTED, never copied from chain) ────
+    // ──── Ghost State: Nonces (PREDICTED on fills, read back after cancels) ────
 
     // ghostListingNonce / ghostListingGlobalNonce are the handler's prediction of the on-chain
-    // nonces: bumped by exactly one on a fill or a single cancel (per-bond) and on cancelAll
-    // (global). They are never read back from the marketplace, so the nonce-mirror invariants
-    // check that the contract advances exactly the predicted key by exactly one, and a mis-bump
-    // also surfaces as an oracle mismatch at the next fill attempt in every campaign.
+    // nonces: bumped by exactly one on a fill (per-bond). A cancel moves its nonce by one plus an
+    // unpredictable amount, so each cancel action asserts that the stored value moved past the
+    // prediction and then takes the stored value as the new prediction. The nonce-mirror invariants
+    // check that a fill advances exactly the predicted key by exactly one and that no other key
+    // moved, and a mis-bump also surfaces as an oracle mismatch at the next fill attempt.
     //
     // There is no on-chain registration. A maker signs off-chain at the CURRENT nonces, which the
     // handler models by recording the signed (nonce, globalNonce, maturity) triple at the
@@ -489,7 +490,9 @@ contract CofferMarketplaceHandler is Test {
         vm.prank(actor);
         marketplace.cancelListing(bondId);
 
-        ++ghostListingNonce[actor][bondId];
+        uint256 moved = marketplace.sListingNonce(actor, bondId);
+        assertGt(moved, ghostListingNonce[actor][bondId], "cancelListing moved the nonce forward");
+        ghostListingNonce[actor][bondId] = moved;
         if (wasActive) ++ghostTotalListingsCancelled;
     }
 
@@ -510,7 +513,9 @@ contract CofferMarketplaceHandler is Test {
         vm.prank(actor);
         marketplace.cancelAllListings();
 
-        ++ghostListingGlobalNonce[actor];
+        uint256 moved = marketplace.sGlobalListingNonce(actor);
+        assertGt(moved, ghostListingGlobalNonce[actor], "cancelAllListings moved the global nonce forward");
+        ghostListingGlobalNonce[actor] = moved;
         ghostTotalListingsRevoked += revoked;
     }
 
@@ -577,7 +582,9 @@ contract CofferMarketplaceHandler is Test {
         vm.prank(actor);
         marketplace.cancelOffer(bondId);
 
-        ++ghostOfferNonce[actor][bondId];
+        uint256 moved = marketplace.sOfferNonce(actor, bondId);
+        assertGt(moved, ghostOfferNonce[actor][bondId], "cancelOffer moved the nonce forward");
+        ghostOfferNonce[actor][bondId] = moved;
         if (wasActive) ++ghostTotalOffersCancelled;
     }
 
@@ -597,7 +604,9 @@ contract CofferMarketplaceHandler is Test {
         vm.prank(actor);
         marketplace.cancelAllOffers();
 
-        ++ghostOfferGlobalNonce[actor];
+        uint256 moved = marketplace.sGlobalOfferNonce(actor);
+        assertGt(moved, ghostOfferGlobalNonce[actor], "cancelAllOffers moved the global nonce forward");
+        ghostOfferGlobalNonce[actor] = moved;
         ghostTotalOffersRevoked += revoked;
     }
 
@@ -666,12 +675,18 @@ contract CofferMarketplaceHandler is Test {
         uint256[] memory ids = new uint256[](len);
         for (uint256 i; i < len; ++i) {
             ids[i] = ghostMintedBondIds[uint256(keccak256(abi.encode(idsSeed, i))) % ghostMintedBondIds.length];
-            if (_isListingActive(actor, ids[i])) ++ghostTotalListingsCancelled; // a repeated id counts once
-            ++ghostListingNonce[actor][ids[i]];
+            // A repeated id counts once, and its nonce is read back once below.
+            if (!_repeated(ids, i) && _isListingActive(actor, ids[i])) ++ghostTotalListingsCancelled;
             ++callsCancelListingsEntries;
         }
         vm.prank(actor);
         marketplace.cancelListings(ids);
+        for (uint256 i; i < len; ++i) {
+            if (_repeated(ids, i)) continue;
+            uint256 moved = marketplace.sListingNonce(actor, ids[i]);
+            assertGt(moved, ghostListingNonce[actor][ids[i]], "cancelListings moved the nonce forward");
+            ghostListingNonce[actor][ids[i]] = moved;
+        }
     }
 
     function handlerCancelOffers(uint256 actorSeed, uint256 idsSeed, uint8 lenSeed) external {
@@ -686,12 +701,26 @@ contract CofferMarketplaceHandler is Test {
         uint256[] memory ids = new uint256[](len);
         for (uint256 i; i < len; ++i) {
             ids[i] = ghostMintedBondIds[uint256(keccak256(abi.encode(idsSeed, i))) % ghostMintedBondIds.length];
-            if (_isOfferActive(actor, ids[i])) ++ghostTotalOffersCancelled;
-            ++ghostOfferNonce[actor][ids[i]];
+            // A repeated id counts once, and its nonce is read back once below.
+            if (!_repeated(ids, i) && _isOfferActive(actor, ids[i])) ++ghostTotalOffersCancelled;
             ++callsCancelOffersEntries;
         }
         vm.prank(actor);
         marketplace.cancelOffers(ids);
+        for (uint256 i; i < len; ++i) {
+            if (_repeated(ids, i)) continue;
+            uint256 moved = marketplace.sOfferNonce(actor, ids[i]);
+            assertGt(moved, ghostOfferNonce[actor][ids[i]], "cancelOffers moved the nonce forward");
+            ghostOfferNonce[actor][ids[i]] = moved;
+        }
+    }
+
+    /// Whether ids[i] already appears earlier in ids, so a batch cancel counts and reads each bond once.
+    function _repeated(uint256[] memory ids, uint256 i) internal pure returns (bool) {
+        for (uint256 j; j < i; ++j) {
+            if (ids[j] == ids[i]) return true;
+        }
+        return false;
     }
 
     /// @dev Picks the owner half the time and an arbitrary actor otherwise, throttled to one call in four.

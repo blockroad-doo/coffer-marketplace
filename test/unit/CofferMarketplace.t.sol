@@ -407,7 +407,7 @@ contract CofferMarketplaceTest is Test {
         vm.prank(seller);
         marketplace.cancelListing(bondId);
 
-        assertEq(marketplace.sListingNonce(seller, bondId), 1);
+        assertGt(marketplace.sListingNonce(seller, bondId), 0);
     }
 
     function test_cancelListing_onlyAffectsOwnListing() public {
@@ -417,7 +417,7 @@ contract CofferMarketplaceTest is Test {
         vm.prank(seller);
         marketplace.cancelListing(bondId);
 
-        assertEq(marketplace.sListingNonce(seller, bondId), 1);
+        assertGt(marketplace.sListingNonce(seller, bondId), 0);
         assertEq(marketplace.sListingNonce(buyer, bondId2), 0); // unaffected
     }
 
@@ -431,8 +431,8 @@ contract CofferMarketplaceTest is Test {
         vm.prank(seller);
         marketplace.cancelListings(ids);
 
-        assertEq(marketplace.sListingNonce(seller, bondId), 1);
-        assertEq(marketplace.sListingNonce(seller, bondId2), 1);
+        assertGt(marketplace.sListingNonce(seller, bondId), 0);
+        assertGt(marketplace.sListingNonce(seller, bondId2), 0);
     }
 
     function test_cancelAllListings() public {
@@ -441,7 +441,7 @@ contract CofferMarketplaceTest is Test {
         vm.prank(seller);
         marketplace.cancelAllListings();
 
-        assertEq(marketplace.sGlobalListingNonce(seller), 1);
+        assertGt(marketplace.sGlobalListingNonce(seller), 0);
     }
 
     // ───── Buy Signed Listing ─────
@@ -689,7 +689,7 @@ contract CofferMarketplaceTest is Test {
         vm.prank(buyer);
         marketplace.cancelOffer(bondId);
 
-        assertEq(marketplace.sOfferNonce(buyer, bondId), 1);
+        assertGt(marketplace.sOfferNonce(buyer, bondId), 0);
     }
 
     function test_cancelOffers_batch() public {
@@ -702,8 +702,8 @@ contract CofferMarketplaceTest is Test {
         vm.prank(buyer);
         marketplace.cancelOffers(ids);
 
-        assertEq(marketplace.sOfferNonce(buyer, bondId), 1);
-        assertEq(marketplace.sOfferNonce(buyer, bondId2), 1);
+        assertGt(marketplace.sOfferNonce(buyer, bondId), 0);
+        assertGt(marketplace.sOfferNonce(buyer, bondId2), 0);
     }
 
     function test_cancelAllOffers() public {
@@ -712,7 +712,7 @@ contract CofferMarketplaceTest is Test {
         vm.prank(buyer);
         marketplace.cancelAllOffers();
 
-        assertEq(marketplace.sGlobalOfferNonce(buyer), 1);
+        assertGt(marketplace.sGlobalOfferNonce(buyer), 0);
     }
 
     // ───── Accept Signed Offer ─────
@@ -907,20 +907,22 @@ contract CofferMarketplaceTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
 
         vm.startPrank(seller);
-        marketplace.cancelListing(bondId); // per-bond nonce 0 -> 1
-        marketplace.cancelAllListings(); // global nonce 0 -> 1
+        marketplace.cancelListing(bondId); // per-bond nonce moves off zero
+        marketplace.cancelAllListings(); // global nonce moves off zero
         vm.stopPrank();
+        uint256 nonce = marketplace.sListingNonce(seller, bondId);
+        uint256 gNonce = marketplace.sGlobalListingNonce(seller);
 
         bytes memory sig = _signListingNow(seller, SELLER_PK, price, exp);
 
         vm.expectEmit(true, true, true, true, address(marketplace));
-        emit CofferMarketplace.ListingPurchased(bondId, buyer, seller, price, 0, 1, 1);
+        emit CofferMarketplace.ListingPurchased(bondId, buyer, seller, price, 0, nonce, gNonce);
 
         vm.prank(buyer);
-        marketplace.buySignedListing{value: price}(bondId, seller, price, 1 ether, exp, 1, 1, sig);
+        marketplace.buySignedListing{value: price}(bondId, seller, price, 1 ether, exp, nonce, gNonce, sig);
 
         // The event carried the consumed value; the counter has already moved past it.
-        assertEq(marketplace.sListingNonce(seller, bondId), 2);
+        assertEq(marketplace.sListingNonce(seller, bondId), nonce + 1);
     }
 
     function test_offerAcceptedEmitsConsumedNonces() public {
@@ -928,18 +930,20 @@ contract CofferMarketplaceTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
 
         vm.startPrank(buyer);
-        marketplace.cancelOffer(bondId); // per-bond nonce 0 -> 1
-        marketplace.cancelAllOffers(); // global nonce 0 -> 1
+        marketplace.cancelOffer(bondId); // per-bond nonce moves off zero
+        marketplace.cancelAllOffers(); // global nonce moves off zero
         vm.stopPrank();
+        uint256 nonce = marketplace.sOfferNonce(buyer, bondId);
+        uint256 gNonce = marketplace.sGlobalOfferNonce(buyer);
 
         bytes memory sig = _signOfferNow(buyer, BUYER_PK, amount, exp);
 
         vm.expectEmit(true, true, true, true, address(marketplace));
-        emit CofferMarketplace.OfferAccepted(bondId, buyer, seller, amount, 0, 1, 1);
+        emit CofferMarketplace.OfferAccepted(bondId, buyer, seller, amount, 0, nonce, gNonce);
 
         vm.prank(seller);
-        marketplace.acceptSignedOffer(bondId, buyer, amount, 1 ether, exp, 1, 1, sig);
+        marketplace.acceptSignedOffer(bondId, buyer, amount, 1 ether, exp, nonce, gNonce, sig);
 
-        assertEq(marketplace.sOfferNonce(buyer, bondId), 2);
+        assertEq(marketplace.sOfferNonce(buyer, bondId), nonce + 1);
     }
 }

@@ -6,11 +6,11 @@ import {CofferMarketplace} from "../../src/CofferMarketplace.sol";
 import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 
 // Durable regression suite for the cancel semantics.
-// A fill requires the signed nonce to equal the current per-bond nonce, and every fill or per-bond
-// cancel advances that nonce by one. The rule is one open listing or offer per maker, bond,
-// and side, signed at the current on-chain nonce. These tests pin the documented cancel semantics on-chain:
-// the batch cancel with a repeated bond id clears a pre-signed queue atomically without touching other
-// bonds, a single cancel arms the next pre-signed listing (the footgun the README warns about), and the
+// A fill requires the signed nonces to equal the current on-chain values. A fill advances the per-bond
+// nonce by one, and a cancel raises its nonce by one plus an unpredictable amount. The rule is one open
+// listing or offer per maker, bond, and side, signed at the current on-chain nonces. These tests pin the
+// documented cancel semantics on-chain: the batch cancel with a repeated bond id steps that bond's nonce
+// twice without touching other bonds, a single cancel revokes a pre-signed next-nonce message, and the
 // global cancel sweeps every listing across all bonds.
 contract VerifyCancelSemanticsTest is Test {
     CofferMarketplace public marketplace;
@@ -94,7 +94,7 @@ contract VerifyCancelSemanticsTest is Test {
     }
 
     // The seller pre-signed listings at nonce N and N+1 for bond A (violating the one-open rule)
-    // and holds a normal listing on bond B. cancelListings([A, A]) advances bond A's nonce by two in
+    // and holds a normal listing on bond B. cancelListings([A, A]) steps bond A's nonce twice in
     // one transaction, killing the whole queue, while bond B's listing stays live and fillable.
     function test_batchCancelRepeatedBondId_clearsPresignedListingQueue() public {
         uint64 exp = uint64(block.timestamp + 1 days);
@@ -109,7 +109,7 @@ contract VerifyCancelSemanticsTest is Test {
         ids[1] = bondA;
         vm.prank(seller);
         marketplace.cancelListings(ids);
-        assertEq(marketplace.sListingNonce(seller, bondA), nonceA + 2, "nonce jumped past the whole queue");
+        assertGt(marketplace.sListingNonce(seller, bondA), nonceA + 1, "nonce jumped past the whole queue");
 
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
@@ -140,7 +140,7 @@ contract VerifyCancelSemanticsTest is Test {
         ids[1] = bondA;
         vm.prank(buyer);
         marketplace.cancelOffers(ids);
-        assertEq(marketplace.sOfferNonce(buyer, bondA), nonceA + 2, "nonce jumped past the whole queue");
+        assertGt(marketplace.sOfferNonce(buyer, bondA), nonceA + 1, "nonce jumped past the whole queue");
 
         vm.prank(seller);
         vm.expectRevert(CofferMarketplace.OfferRevoked.selector);
@@ -155,21 +155,22 @@ contract VerifyCancelSemanticsTest is Test {
         assertEq(bondNft.ownerOf(bondB), buyer, "bond B offer was untouched by the bond A queue clear");
     }
 
-    // The footgun itself, kept as a living document: a single cancel advances the nonce by one, which
-    // arms the pre-signed next-nonce offer. This is why a queue must be cleared with the batch cancel.
-    function test_singleCancel_armsNextPresignedOffer() public {
+    // A single cancel moves the nonce by one plus an unpredictable amount, so a pre-signed next-nonce
+    // offer is revoked by it instead of armed. Only a fill at nonce N arms a message signed at N + 1.
+    function test_singleCancel_revokesNextPresignedOffer() public {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonceA = marketplace.sOfferNonce(buyer, bondA);
         bytes memory sigA1 = _signOffer(BUYER_PK, bondA, 0.5 ether, 1 ether, exp, nonceA + 1, 0);
 
         vm.prank(buyer);
         marketplace.cancelOffer(bondA);
-        assertEq(marketplace.sOfferNonce(buyer, bondA), nonceA + 1, "single cancel advances by one");
+        assertGt(marketplace.sOfferNonce(buyer, bondA), nonceA + 1, "cancel moved past the pre-signed nonce");
 
-        // The pre-signed next-nonce offer is now live and the seller can take it.
+        // The pre-signed next-nonce offer is dead and the seller cannot take it.
         vm.prank(seller);
+        vm.expectRevert(CofferMarketplace.OfferRevoked.selector);
         marketplace.acceptSignedOffer(bondA, buyer, 0.5 ether, 1 ether, exp, nonceA + 1, 0, sigA1);
-        assertEq(bondNft.ownerOf(bondA), buyer, "pre-signed next-nonce offer was armed by the cancel");
+        assertEq(bondNft.ownerOf(bondA), seller, "pre-signed next-nonce offer was revoked by the cancel");
     }
 
     // The global cancel is the sweep: it kills offers across all bonds in one write without touching
@@ -184,7 +185,7 @@ contract VerifyCancelSemanticsTest is Test {
 
         vm.prank(buyer);
         marketplace.cancelAllOffers();
-        assertEq(marketplace.sGlobalOfferNonce(buyer), gNonce + 1, "global nonce bumped");
+        assertGt(marketplace.sGlobalOfferNonce(buyer), gNonce, "global nonce moved");
         assertEq(marketplace.sOfferNonce(buyer, bondA), nonceA, "per-bond nonce A untouched");
         assertEq(marketplace.sOfferNonce(buyer, bondB), nonceB, "per-bond nonce B untouched");
 

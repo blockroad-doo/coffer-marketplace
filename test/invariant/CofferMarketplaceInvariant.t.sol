@@ -102,12 +102,12 @@ contract CofferMarketplaceInvariantTest is Test {
     //  Category 2, Predicted ghost state vs chain
     // ═══════════════════════════════════════════════════════════════
 
-    // The handler never reads nonces or ownership back from the chain. It predicts them: a fill
-    // or a single cancel advances exactly one per-bond nonce by one, cancelAll advances exactly
-    // the global nonce by one, a fill moves the NFT to the taker. These invariants compare the
-    // prediction with the chain for every (actor, bond) key, so a bump of the wrong key, by the
-    // wrong amount, or a missing bump fails here (and, for nonces, also as an oracle mismatch at
-    // the handler's next fill attempt).
+    // The handler never reads ownership back from the chain, and it reads a nonce back only right
+    // after a cancel, which moves it by an unpredictable amount, after asserting that it moved
+    // forward. Everything else it predicts: a fill advances exactly one per-bond nonce by one and
+    // moves the NFT to the taker. These invariants compare the prediction with the chain for every
+    // (actor, bond) key, so a bump of the wrong key, by the wrong amount, or a missing bump fails
+    // here (and, for nonces, also as an oracle mismatch at the handler's next fill attempt).
 
     function invariant_listingNoncesMatchOnChain() public view {
         uint256 numActors = handler.getActorsLength();

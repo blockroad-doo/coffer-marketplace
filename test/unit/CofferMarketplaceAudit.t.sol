@@ -394,7 +394,7 @@ contract CofferMarketplaceAuditTest is Test {
         marketplace.cancelAllListings();
 
         assertEq(marketplace.sListingNonce(seller, bondId), perBondBefore);
-        assertEq(marketplace.sGlobalListingNonce(seller), 1);
+        assertGt(marketplace.sGlobalListingNonce(seller), 0);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -512,22 +512,23 @@ contract CofferMarketplaceAuditTest is Test {
         uint128 mat = coffer.maturityValues(bondId);
         bytes memory sigOld = _signListing(SELLER_PK, bondId, 1 ether, mat, exp, 0, 0);
 
-        // Seller cancels, bumping the per-bond nonce to 1
+        // Seller cancels, moving the per-bond nonce off 0
         vm.prank(seller);
         marketplace.cancelListing(bondId);
-        assertEq(marketplace.sListingNonce(seller, bondId), 1);
+        assertGt(marketplace.sListingNonce(seller, bondId), 0);
 
         // The old listing at nonce 0 is no longer fillable
         vm.prank(buyer);
         vm.expectRevert(CofferMarketplace.ListingRevoked.selector);
         marketplace.buySignedListing{value: 1 ether}(bondId, seller, 1 ether, mat, exp, 0, 0, sigOld);
 
-        // A fresh listing signed at nonce 1 fills, paying the fee on the 3 ether profit
+        // A fresh listing signed at the current nonce fills, paying the fee on the 3 ether profit
+        uint256 nonce = marketplace.sListingNonce(seller, bondId);
         uint128 mat2 = coffer.maturityValues(bondId);
-        bytes memory sigNew = _signListing(SELLER_PK, bondId, 2 ether, mat2, exp, 1, 0);
+        bytes memory sigNew = _signListing(SELLER_PK, bondId, 2 ether, mat2, exp, nonce, 0);
         uint256 fee = _fee(3 ether);
         vm.prank(buyer);
-        marketplace.buySignedListing{value: 2 ether + fee}(bondId, seller, 2 ether, mat2, exp, 1, 0, sigNew);
+        marketplace.buySignedListing{value: 2 ether + fee}(bondId, seller, 2 ether, mat2, exp, nonce, 0, sigNew);
         assertEq(bondNft.ownerOf(bondId), buyer);
     }
 
@@ -732,7 +733,7 @@ contract CofferMarketplaceAuditTest is Test {
         assertLt(gasUsed, 30_000_000, "1000 cancelListings exceeds block gas limit");
 
         for (uint256 i = 0; i < count; ++i) {
-            assertEq(marketplace.sListingNonce(seller, bondIds[i]), 1);
+            assertGt(marketplace.sListingNonce(seller, bondIds[i]), 0);
         }
     }
 
