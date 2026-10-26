@@ -9,10 +9,9 @@ import {IERC721Receiver, MockBondNft, MockCoffer, MockWETH} from "./CofferMarket
 // an owner who is also a party can call it from inside the fill. Every ordering that still holds the taker's
 // ETH reverts as a whole, so nothing of the taker's reaches the recipient. Owner as seller sweeping in
 // receive with an excess to refund: the refund finds no balance, InsufficientPayment. Owner as buyer
-// sweeping in the ERC-721 hook: the seller payout and the fallback deposit both find no balance, and the
-// deposit's failure carries no data. The one ordering that settles, owner as seller with no excess, is
-// documented: the price has already left, so the sweep takes the accrued fees plus this fill's fee, which
-// belong to the recipient anyway.
+// sweeping in the ERC-721 hook: the seller payout finds no balance, SellerPaymentFailed. The one ordering
+// that settles, owner as seller with no excess, is documented: the price has already left, so the sweep
+// takes the accrued fees plus this fill's fee, which belong to the recipient anyway.
 
 /// @dev ERC-1271 seller that validates any signature and, as the owner, sweeps from its receive.
 contract OwnerSellerSweeper {
@@ -151,7 +150,7 @@ contract VerifyOwnerPartySweepTest is Test {
         marketplace.buySignedListing{value: TOTAL}(bondId, address(sweeper), PRICE, MATURITY, expiration, 0, 0, "");
 
         assertEq(address(sweeper).balance, PRICE, "seller paid the price in ETH before the sweep");
-        assertEq(weth.balanceOf(address(sweeper)), 0, "no fallback");
+        assertEq(weth.balanceOf(address(sweeper)), 0, "no WETH paid");
         assertEq(feeRecipient.balance - recipientBefore, ACCRUED + FEE, "the sweep took the fees and nothing else");
         assertEq(address(marketplace).balance, 0);
         assertEq(buyer.balance, buyerBefore - TOTAL, "taker charged exactly price + fee");
@@ -159,7 +158,7 @@ contract VerifyOwnerPartySweepTest is Test {
         assertEq(marketplace.sListingNonce(address(sweeper), bondId), 1);
     }
 
-    function test_ownerBuyerSweepsInHook_revertsWholeWithNoData() public {
+    function test_ownerBuyerSweepsInHook_revertsSellerPaymentFailed() public {
         OwnerBuyerSweeper sweeper = new OwnerBuyerSweeper();
         _deployOwnedBy(address(sweeper));
         sweeper.setMarketplace(marketplace);
@@ -171,9 +170,8 @@ contract VerifyOwnerPartySweepTest is Test {
         vm.deal(address(sweeper), TOTAL);
         uint256 recipientBefore = feeRecipient.balance;
 
-        // The hook's sweep empties the contract. The bounded payout then fails on balance, and the fallback
-        // deposit is a value call above the balance, which fails at the CALL opcode with no returndata, so the
-        // taker's revert carries none.
+        // The hook's sweep empties the contract, so the seller payout is a value call above the balance. It
+        // fails at the CALL opcode and the fill reverts with SellerPaymentFailed.
         bytes memory data = abi.encodeCall(
             CofferMarketplace.buySignedListing, (bondId, seller, PRICE, MATURITY, expiration, 0, 0, sig)
         );
@@ -181,7 +179,11 @@ contract VerifyOwnerPartySweepTest is Test {
         (bool ok, bytes memory ret) = address(marketplace).call{value: TOTAL}(data);
 
         assertFalse(ok, "fill must revert as a whole");
-        assertEq(ret.length, 0, "the deposit's failure bubbles no data");
+        assertEq(
+            ret,
+            abi.encodeWithSelector(CofferMarketplace.SellerPaymentFailed.selector),
+            "the payout's failure reverts SellerPaymentFailed"
+        );
         assertEq(address(marketplace).balance, ACCRUED, "accrued fees untouched");
         assertEq(feeRecipient.balance, recipientBefore, "nothing reached the recipient");
         assertEq(address(sweeper).balance, TOTAL, "taker's ETH untouched");

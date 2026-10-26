@@ -28,7 +28,4 @@ interface IWETH {
     /// @param spender The address that can spend the allowance
     /// @return The remaining allowance
     function allowance(address owner, address spender) external view returns (uint256);
-
-    /// @notice Wrap ETH into WETH
-    function deposit() external payable;
 }

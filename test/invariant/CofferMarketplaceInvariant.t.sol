@@ -55,7 +55,6 @@ contract CofferMarketplaceInvariantTest is Test {
             total += handler.getActorAt(i).balance;
         }
         total += address(marketplace).balance;
-        total += address(weth).balance;
         total += feeRecipient.balance;
         assertEq(total, handler.ghostInitialTotalEth(), "Total ETH must be conserved");
     }
@@ -68,10 +67,7 @@ contract CofferMarketplaceInvariantTest is Test {
         }
         total += weth.balanceOf(address(marketplace));
         total += weth.balanceOf(feeRecipient);
-        // The listing fallback deposits the price into WETH, which mints
-        assertEq(
-            total, handler.ghostInitialTotalWeth() + handler.ghostWethMintedByFallback(), "Total WETH must be conserved"
-        );
+        assertEq(total, handler.ghostInitialTotalWeth(), "Total WETH must be conserved");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -191,7 +187,6 @@ contract CofferMarketplaceInvariantTest is Test {
         console2.log("setApproval:              ", handler.callsSetApproval());
         console2.log("admin throttled:          ", handler.skippedAdminThrottled());
         console2.log("setWalletMode:            ", handler.callsSetWalletMode());
-        console2.log("fallback payouts:         ", handler.ghostFallbackPayouts());
         console2.log("wallet fills settled:     ", handler.ghostWalletFillsSettled());
         console2.log("--- Signed messages ---");
         console2.log("mintedBonds:              ", handler.getMintedBondCount());
@@ -212,6 +207,7 @@ contract CofferMarketplaceInvariantTest is Test {
         console2.log("MarketplaceNotApproved:   ", _buyRejected(CofferMarketplace.MarketplaceNotApproved.selector));
         console2.log("InvalidSignature:         ", _buyRejected(CofferMarketplace.InvalidSignature.selector));
         console2.log("HookRejected:             ", _buyRejected(HandlerWallet.HookRejected.selector));
+        console2.log("SellerPaymentFailed:      ", _buyRejected(CofferMarketplace.SellerPaymentFailed.selector));
         console2.log("InsufficientPayment:      ", _buyRejected(CofferMarketplace.InsufficientPayment.selector));
         console2.log("ExpirationNotInFuture:    ", _buyRejected(CofferMarketplace.ExpirationNotInFuture.selector));
         console2.log("BondNotOutstanding:       ", _buyRejected(CofferMarketplace.BondNotOutstanding.selector));

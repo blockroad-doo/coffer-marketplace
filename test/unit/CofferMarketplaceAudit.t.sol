@@ -89,19 +89,9 @@ contract MockCoffer {
 contract MockWETH {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
-    bool public depositFails;
-
-    function setDepositFails(bool flag) external {
-        depositFails = flag;
-    }
 
     function mint(address to, uint256 amount) external {
         balanceOf[to] += amount;
-    }
-
-    function deposit() external payable {
-        require(!depositFails, "WETH_DEPOSIT_FAIL");
-        balanceOf[msg.sender] += msg.value;
     }
 
     function approve(address spender, uint256 amount) external returns (bool) {
@@ -475,12 +465,12 @@ contract CofferMarketplaceAuditTest is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Edge: WETH fallback when the seller is a contract that rejects ETH
+    // Edge: a contract seller that rejects ETH fails the whole fill
     // ═══════════════════════════════════════════════════════════════
 
-    function test_buySignedListing_wethFallbackSafeDeposit() public {
-        // An ERC-1271 contract seller with no receive function rejects ETH, so the marketplace
-        // wraps the proceeds to WETH.
+    function test_buySignedListing_sellerRejectsEth_revertsWhole() public {
+        // An ERC-1271 contract seller with no receive function rejects ETH, so the fill reverts with
+        // SellerPaymentFailed and leaves no ETH in the marketplace.
         Erc1271EthRejecter cSeller = new Erc1271EthRejecter();
         uint256 cBond = bondNft.mintTo(address(cSeller), address(coffer));
         coffer.setMaturityValue(cBond, 5 ether);
@@ -490,15 +480,17 @@ contract CofferMarketplaceAuditTest is Test {
         uint64 exp = uint64(block.timestamp + 1 days);
         uint256 nonce = marketplace.sListingNonce(address(cSeller), cBond);
 
-        uint256 wethBefore = weth.balanceOf(address(cSeller));
+        uint256 marketBefore = address(marketplace).balance;
 
         uint128 mat = coffer.maturityValues(cBond);
         uint256 fee = _fee(4 ether);
         vm.prank(buyer);
+        vm.expectRevert(CofferMarketplace.SellerPaymentFailed.selector);
         marketplace.buySignedListing{value: price + fee}(cBond, address(cSeller), price, mat, exp, nonce, 0, "");
 
-        assertEq(weth.balanceOf(address(cSeller)) - wethBefore, price);
-        assertEq(bondNft.ownerOf(cBond), buyer);
+        assertEq(address(marketplace).balance, marketBefore);
+        assertEq(bondNft.ownerOf(cBond), address(cSeller));
+        assertEq(marketplace.sListingNonce(address(cSeller), cBond), nonce);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -620,11 +612,11 @@ contract CofferMarketplaceAuditTest is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // PoC-3: Returndata bomb, gas cost constant
-    // The seller contract returns 100KB from its receive, which fits inside the gas the payout
-    // forwards, so the seller call succeeds and returns the payload. _safeTransferETH skips the
-    // returndata copy, so the buy gas stays constant.
-    // Verdict: PASS (gas constant regardless of returndata size)
+    // PoC-3: Returndata bomb, no copy in the marketplace
+    // The seller contract returns 100KB from its receive, so the seller call succeeds and returns the
+    // payload. _safeTransferETH skips the returndata copy, so the payload costs the marketplace nothing.
+    // Building it is the seller's own spend out of the gas the payout forwards.
+    // Verdict: PASS (no returndata copied into the marketplace's memory)
     // ═══════════════════════════════════════════════════════════════
 
     function test_poc3_returndataBombGasConstant() public {
@@ -646,21 +638,20 @@ contract CofferMarketplaceAuditTest is Test {
 
         assertTrue(gasUsed < 500_000, "Returndata bomb caused excessive gas");
         assertEq(bondNft.ownerOf(cBond), buyer);
-        // The seller call must have succeeded, otherwise the fill settled through the WETH
-        // fallback and never exercised the returndata path this test is about.
+        // The seller call must have succeeded, so the fill exercised the returndata path this test is about.
         assertEq(address(cSeller).balance, price, "seller paid in ETH");
-        assertEq(weth.balanceOf(address(cSeller)), 0, "seller must not have been paid in WETH");
+        assertEq(weth.balanceOf(address(cSeller)), 0, "no WETH paid");
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // PoC-4: WETH fallback reentrancy
+    // PoC-4: Seller reentrancy from the payout
     // The seller contract reenters buySignedListing from its receive. nonReentrant blocks the
-    // reentry, so the ETH send fails and the trade settles via the WETH fallback.
+    // reentry, so the ETH send fails and the whole fill reverts with SellerPaymentFailed.
     // Verdict: PASS (nonReentrant blocks reentry)
     // ═══════════════════════════════════════════════════════════════
 
-    function test_poc4_wethFallbackReentrancyBlocked() public {
-        ReentrantSellerFallback cSeller = new ReentrantSellerFallback(marketplace);
+    function test_poc4_sellerReentrancyBlocked() public {
+        ReentrantSeller cSeller = new ReentrantSeller(marketplace);
         uint256 cBond = bondNft.mintTo(address(cSeller), address(coffer));
         coffer.setMaturityValue(cBond, 5 ether);
         cSeller.approveNft(address(bondNft), address(marketplace));
@@ -672,10 +663,11 @@ contract CofferMarketplaceAuditTest is Test {
         uint128 mat = coffer.maturityValues(cBond);
         uint256 fee = _fee(4 ether);
         vm.prank(buyer);
+        vm.expectRevert(CofferMarketplace.SellerPaymentFailed.selector);
         marketplace.buySignedListing{value: price + fee}(cBond, address(cSeller), price, mat, exp, nonce, 0, "");
 
-        assertEq(bondNft.ownerOf(cBond), buyer);
-        assertEq(weth.balanceOf(address(cSeller)), price);
+        assertEq(bondNft.ownerOf(cBond), address(cSeller));
+        assertEq(marketplace.sListingNonce(address(cSeller), cBond), nonce);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -821,7 +813,7 @@ contract CofferMarketplaceAuditTest is Test {
 }
 
 /// @dev ERC-1271 contract seller that validates any signature and rejects ETH (no receive
-///      function), used to exercise the WETH fallback.
+///      function), used to show that a fill reverts when the seller rejects ETH.
 contract Erc1271EthRejecter {
     bytes4 internal constant MAGIC = 0x1626ba7e;
 
@@ -834,8 +826,8 @@ contract Erc1271EthRejecter {
     }
 }
 
-/// @dev ERC-1271 contract seller that validates any signature and returns a 300KB blob from its
-///      receive, used to confirm the returndata-bomb-safe ETH transfer keeps gas constant.
+/// @dev ERC-1271 contract seller that validates any signature and returns a 100KB blob from its
+///      receive, used to confirm the ETH transfer copies no returndata into the marketplace.
 contract Erc1271ReturndataBomber {
     bytes4 internal constant MAGIC = 0x1626ba7e;
 
@@ -857,8 +849,8 @@ contract Erc1271ReturndataBomber {
 }
 
 /// @dev ERC-1271 contract seller that validates any signature and reenters buySignedListing from
-///      its receive, used to confirm nonReentrant blocks the reentry and the trade settles in WETH.
-contract ReentrantSellerFallback {
+///      its receive, used to confirm nonReentrant blocks the reentry and the whole fill reverts.
+contract ReentrantSeller {
     bytes4 internal constant MAGIC = 0x1626ba7e;
     CofferMarketplace public marketplace;
 

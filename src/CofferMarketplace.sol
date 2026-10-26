@@ -23,7 +23,8 @@ import {IWETH} from "./interfaces/IWETH.sol";
  * @notice Makers revoke an outstanding signature on-chain only, by bumping a per-bond or a global nonce
  * @notice Charges a fixed fee of FEE_BPS (900 basis points, 9%) of the buyer's profit, the maturity value minus
  * the price when positive, on completed trades only, paid on top by the buyer in ETH or by the offerer in WETH
- * @notice Pays a seller that cannot receive ETH in WETH instead, so a fill never fails on the payout
+ * @notice Pays a listing seller in ETH only, and a seller that does not accept the ETH fails the whole fill, so
+ * the listing stays live
  * @notice Delivers the bond to an offer maker without the ERC-721 receiver hook, so no maker code runs after
  * the WETH has moved
  */
@@ -43,6 +44,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     error MarketplaceNotApproved();
     error ExpirationNotInFuture();
     error InsufficientPayment();
+    error SellerPaymentFailed();
     error NothingToClaim();
     error NothingToClaimWeth();
     error InvalidSignature();
@@ -70,12 +72,6 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     /// @notice Fee on the buyer's profit in basis points, the same for listings and offers. A
     ///         constant, there is no setter.
     uint256 public constant FEE_BPS = 900;
-
-    /// @notice Gas forwarded to the seller when paying a listing price in ETH. A seller whose
-    ///         receive costs more than this is paid in WETH through the fallback instead. Takers
-    ///         should size the gas limit of a fill to cover this plus the WETH fallback, because
-    ///         the seller's receive can change between estimation and inclusion.
-    uint256 public constant SELLER_PAYOUT_GAS_LIMIT = 100_000;
 
     // ───── State ─────
 
@@ -534,7 +530,7 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         require(block.timestamp <= _expiration, ExpirationNotInFuture()); // forge-lint: disable-line(block-timestamp)
     }
 
-    /// @notice Finalise a signed-listing purchase: event, NFT, ETH/WETH, refund.
+    /// @notice Finalise a signed-listing purchase: event, NFT, ETH, refund.
     /// @param _bondId The bond token ID
     /// @param _seller The seller address
     /// @param _price The listing price in wei
@@ -558,21 +554,15 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
         // slither-disable-next-line arbitrary-send-erc20,calls-loop
         ICofferBondNft(I_COFFER_BOND_NFT).safeTransferFrom(_seller, msg.sender, _bondId);
 
-        // The forwarded gas is bounded, so a seller whose receive burns gas cannot leave the
-        // WETH fallback that follows without enough gas to run.
+        // A seller that does not accept the ETH fails the whole fill, so the nonce bump reverts with it
+        // and the listing stays live.
         // slither-disable-next-line arbitrary-send-eth,calls-loop
-        bool okSeller = _safeTransferETH(_seller, _price, SELLER_PAYOUT_GAS_LIMIT);
-        if (!okSeller) {
-            IWETH(I_WETH).deposit{value: _price}();
-            IERC20(I_WETH).safeTransfer(_seller, _price);
-        }
+        require(_safeTransferETH(_seller, _price), SellerPaymentFailed());
 
         if (_excess > 0) {
-            // The refund pays the caller back, so an expensive receive here is self-paid and the
-            // leg forwards everything. gasleft() exceeds what remains at call time, so the EVM's
-            // 63/64 rule decides the forwarded amount.
+            // The refund pays the caller back, so an expensive receive here is self-paid.
             // slither-disable-next-line arbitrary-send-eth
-            require(_safeTransferETH(msg.sender, _excess, gasleft()), InsufficientPayment());
+            require(_safeTransferETH(msg.sender, _excess), InsufficientPayment());
         }
     }
 
@@ -624,28 +614,28 @@ contract CofferMarketplace is Ownable2Step, ReentrancyGuard, EIP712 {
     ///      A malicious recipient can exploit this by returning a large payload (e.g., 100KB)
     ///      from their receive/fallback function, causing quadratic memory expansion gas costs
     ///      charged to the caller. Using assembly with returndatasize 0 (the last two zeros in
-    ///      the call opcode: `call(gasLimit, to, amount, 0, 0, 0, 0)`) tells the EVM to skip the
-    ///      returndata copy entirely, making the gas cost constant regardless of what the
-    ///      recipient returns.
+    ///      the call opcode: `call(gas(), to, amount, 0, 0, 0, 0)`) tells the EVM to skip the
+    ///      returndata copy entirely, so the caller pays no copy cost whatever the recipient
+    ///      returns.
     /// @dev The immunity covers the paths that route through this helper, which are the seller
     ///      payout and the buyer refund in _executeBuy. The fee claims deliberately do not, because
     ///      they keep the recipient's revert reason instead. See claimFees.
+    /// @dev The call forwards all remaining gas. The EVM keeps 1/64 of it for the caller and adds
+    ///      the 2300 value stipend on top. Both callers revert when the transfer fails, so a
+    ///      recipient that rejects the ETH or burns the gas fails the whole fill.
     /// @param _to The address to transfer ETH to
     /// @param _amount The amount of ETH to transfer in wei
-    /// @param _gasLimit The gas forwarded to the recipient. The EVM caps the forwarded amount at
-    ///        63/64 of what remains and adds the 2300 value stipend on top, so a bounded value
-    ///        here bounds what a recipient can burn out of the caller's gas.
     /// @return success Whether the transfer succeeded
     // slither-disable-next-line assembly
-    function _safeTransferETH(address _to, uint256 _amount, uint256 _gasLimit) internal returns (bool success) {
+    function _safeTransferETH(address _to, uint256 _amount) internal returns (bool success) {
         // forge-lint: disable-next-item(inline-assembly)
         // solhint-disable-next-line no-inline-assembly
         assembly {
-            // call(gasLimit, to, value, inputOffset, inputSize, outputOffset, outputSize)
+            // call(gas, to, value, inputOffset, inputSize, outputOffset, outputSize)
             // The final two zeros (outputOffset=0, outputSize=0) are critical:
             // they prevent the EVM from copying any returndata into memory,
             // which is what makes this immune to returndata bomb attacks.
-            success := call(_gasLimit, _to, _amount, 0, 0, 0, 0)
+            success := call(gas(), _to, _amount, 0, 0, 0, 0)
         }
     }
 }

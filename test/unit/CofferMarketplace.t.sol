@@ -117,10 +117,6 @@ contract MockWETH {
         balanceOf[to] += amount;
     }
 
-    function deposit() external payable {
-        balanceOf[msg.sender] += msg.value;
-    }
-
     function approve(address spender, uint256 amount) external returns (bool) {
         allowance[msg.sender][spender] = amount;
         return true;
@@ -171,7 +167,7 @@ contract EthRejecter is IERC721Receiver {
 }
 
 /// @dev Contract seller that validates any ERC-1271 signature and rejects ETH (it has no receive
-///      function), used to exercise the WETH fallback when the seller cannot accept ETH.
+///      function), used to show that a fill reverts with SellerPaymentFailed when the seller cannot accept ETH.
 contract Erc1271EthRejecter {
     bytes4 internal constant MAGIC = 0x1626ba7e;
 
@@ -607,7 +603,7 @@ contract CofferMarketplaceTest is Test {
     }
 
     function test_buySignedListing_sellerGetsEth() public {
-        // Verify EOA seller receives ETH directly (no WETH wrapping)
+        // Verify EOA seller receives ETH directly
         uint128 price = 1 ether;
         uint64 exp = uint64(block.timestamp + 1 days);
         bytes memory sig = _signListingNow(seller, SELLER_PK, price, exp);
@@ -626,9 +622,9 @@ contract CofferMarketplaceTest is Test {
         assertEq(bondNft.ownerOf(bondId), buyer);
     }
 
-    function test_buySignedListing_sellerRejectsEth_fallsBackToWeth() public {
-        // A contract seller with no receive function rejects ETH, so the marketplace wraps the
-        // proceeds to WETH. The seller is an ERC-1271 wallet so its signature still verifies.
+    function test_buySignedListing_sellerRejectsEth_revertsSellerPaymentFailed() public {
+        // A contract seller with no receive function rejects ETH, so the whole fill reverts and the
+        // listing stays live. The seller is an ERC-1271 wallet so its signature still verifies.
         Erc1271EthRejecter cSeller = new Erc1271EthRejecter();
         uint256 cBond = bondNft.mintTo(address(cSeller), address(coffer));
         cSeller.approveNft(address(bondNft), address(marketplace));
@@ -638,16 +634,17 @@ contract CofferMarketplaceTest is Test {
         uint256 nonce = marketplace.sListingNonce(address(cSeller), cBond);
         uint256 gNonce = marketplace.sGlobalListingNonce(address(cSeller));
 
-        uint256 sellerEthBefore = address(cSeller).balance;
-        uint256 sellerWethBefore = weth.balanceOf(address(cSeller));
+        uint256 buyerBefore = buyer.balance;
 
         // The wallet validates any signature, so an empty signature is accepted
         vm.prank(buyer);
+        vm.expectRevert(CofferMarketplace.SellerPaymentFailed.selector);
         marketplace.buySignedListing{value: price}(cBond, address(cSeller), price, 1 ether, exp, nonce, gNonce, "");
 
-        assertEq(address(cSeller).balance - sellerEthBefore, 0, "Seller should not receive ETH");
-        assertEq(weth.balanceOf(address(cSeller)) - sellerWethBefore, price, "Seller should receive WETH via fallback");
-        assertEq(bondNft.ownerOf(cBond), buyer, "Buyer should own NFT");
+        assertEq(bondNft.ownerOf(cBond), address(cSeller), "Seller should keep the NFT");
+        assertEq(marketplace.sListingNonce(address(cSeller), cBond), nonce, "Nonce should not move");
+        assertEq(buyer.balance, buyerBefore, "Buyer should keep the ETH");
+        assertEq(address(cSeller).balance, 0, "Seller should not receive ETH");
     }
 
     function test_buySignedListing_buyerRefundFailsReverts() public {

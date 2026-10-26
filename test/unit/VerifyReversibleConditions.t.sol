@@ -11,7 +11,7 @@ import {MockBondNft, MockCoffer, MockWETH} from "./CofferMarketplace.t.sol";
 // reversible, and the contract holds no memory of them: when the condition goes away the same
 // signature at the same nonce fills again. These tests pin that as a property of the contract.
 //
-// The boundary test pins _validateTrade's inequality (CofferMarketplace.sol:498). The contract
+// The boundary test pins _validateTrade's inequality (CofferMarketplace.sol:530). The contract
 // allows block.timestamp == expiration, so a fill at the boundary second settles.
 contract VerifyReversibleConditionsTest is Test {
     CofferMarketplace public marketplace;

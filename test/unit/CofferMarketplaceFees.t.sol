@@ -84,10 +84,6 @@ contract MockWETH {
         balanceOf[to] += amount;
     }
 
-    function deposit() external payable {
-        balanceOf[msg.sender] += msg.value;
-    }
-
     function approve(address spender, uint256 amount) external returns (bool) {
         allowance[msg.sender][spender] = amount;
         return true;

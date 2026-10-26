@@ -5,10 +5,10 @@ pragma solidity 0.8.34;
 //
 // I_WETH and I_COFFER_BOND_NFT are immutable with no setter, so an address that holds no code is
 // baked in permanently and leaves a half dead deployment: every offer accept reverts at the WETH
-// balance read, any listing whose seller rejects ETH dies at the WETH fallback, and claimWethFees
-// is bricked, while plain ETH listing fills keep working. Requiring code at both addresses rejects
-// that at construction, and covers address(0) in the same check. The fee recipient is deliberately
-// not covered, because it is allowed to be an account rather than a contract.
+// balance read and claimWethFees is bricked, while listing fills, which never touch WETH, keep
+// working. Requiring code at both addresses rejects that at construction, and covers address(0) in
+// the same check. The fee recipient is deliberately not covered, because it is allowed to be an
+// account rather than a contract.
 //
 // Run: forge test --match-path "test/unit/VerifyConstructorCodeChecks.t.sol" -vv
 

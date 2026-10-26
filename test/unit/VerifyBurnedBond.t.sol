@@ -104,8 +104,8 @@ contract VerifyBurnedBondTest is Test {
 
     // ───── Listing side─────
 
-    // buySignedListing reads ownerOf at CofferMarketplace.sol:352, five statements before it asks
-    // the coffer for a maturity at :361. A burned token has no owner, so the read itself reverts and
+    // buySignedListing reads ownerOf at CofferMarketplace.sol:378, five statements before it asks
+    // the coffer for a maturity at :387. A burned token has no owner, so the read itself reverts and
     // the marketplace never forms an opinion.
     function test_burnedBond_listingRevertsInOwnerOf() public {
         uint64 exp = uint64(block.timestamp + 1 days);
@@ -121,7 +121,7 @@ contract VerifyBurnedBondTest is Test {
 
     // ───── Offer side─────
 
-    // acceptSignedOffer reads ownerOf at :434 for its own NotOwner check, so the offer side fails in
+    // acceptSignedOffer reads ownerOf at :465 for its own NotOwner check, so the offer side fails in
     // the same place and for the same reason.
     function test_burnedBond_offerRevertsInOwnerOf() public {
         uint64 exp = uint64(block.timestamp + 1 days);

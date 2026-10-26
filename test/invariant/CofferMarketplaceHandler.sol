@@ -109,10 +109,6 @@ contract MockWETHForHandler {
         balanceOf[to] += amount;
         return true;
     }
-
-    function deposit() external payable {
-        balanceOf[msg.sender] += msg.value;
-    }
 }
 
 // ───── Handler ─────
@@ -125,16 +121,16 @@ contract MockWETHForHandler {
 ///         handler-universe limits (nothing signed yet, nothing to sign for, handler funds), each
 ///         counted so a starved path is visible in the afterInvariant summary.
 /// @dev Contract actor for the strict suite: an ERC-1271 wallet that validates its owner's
-///      key while `authorized`, with a receive mode that decides the listing payout leg and a hook that can
-///      reject a delivery. It never reverts inside isValidSignature, a reverting check would register as the
-///      innermost reverting frame.
+///      key while `authorized`, with a receive mode that decides whether a listing fill that pays it settles,
+///      and a hook that can reject a delivery. It never reverts inside isValidSignature, a reverting check would
+///      register as the innermost reverting frame.
 contract HandlerWallet is IERC721Receiver {
     enum ReceiveMode {
         Accept,
         Reject,
         BurnAll,
-        SpendUnder,
-        SpendOver
+        SpendLow,
+        SpendHigh
     }
 
     bytes4 internal constant MAGIC = 0x1626ba7e;
@@ -182,8 +178,8 @@ contract HandlerWallet is IERC721Receiver {
         if (receiveMode == ReceiveMode.BurnAll) {
             while (true) {}
         }
-        if (receiveMode == ReceiveMode.SpendUnder) _spin(30_000);
-        if (receiveMode == ReceiveMode.SpendOver) _spin(150_000);
+        if (receiveMode == ReceiveMode.SpendLow) _spin(30_000);
+        if (receiveMode == ReceiveMode.SpendHigh) _spin(150_000);
     }
 
     /// @dev Burns about `spend` gas, then one storage write, like CostlyReceiveSeller in the unit tree
@@ -208,6 +204,13 @@ contract CofferMarketplaceHandler is Test {
     );
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+
+    // ──── Fill gas ────
+
+    // A fill whose seller burns everything it is sent runs at this gas limit. The payout forwards all
+    // remaining gas, so without one the burn would run through the handler call's whole gas. The
+    // marketplace keeps 1/64 of it, enough to raise SellerPaymentFailed.
+    uint256 internal constant BURN_ALL_FILL_GAS = 1_000_000;
 
     // ──── External Contracts ────
 
@@ -327,8 +330,6 @@ contract CofferMarketplaceHandler is Test {
 
     uint256 public ghostInitialTotalEth;
     uint256 public ghostInitialTotalWeth;
-    // WETH the listing fallback minted by depositing the price: the WETH sum grows by it
-    uint256 public ghostWethMintedByFallback;
 
     // ──── Ghost State: Fee ledger ────
     // The contract keeps no fee ledger: the marketplace's ETH balance must equal the fees of the
@@ -381,7 +382,6 @@ contract CofferMarketplaceHandler is Test {
     uint256 public skippedAcceptOwnershipNoPending;
     // Contract-wallet actors
     uint256 public callsSetWalletMode;
-    uint256 public ghostFallbackPayouts;
     uint256 public ghostWalletFillsSettled;
 
     // ──── Constructor ────
@@ -934,6 +934,9 @@ contract CofferMarketplaceHandler is Test {
     ///      call must revert with exactly that selector, or the call must succeed and settle
     ///      exactly, after which the identical replay must be rejected on the nonce check.
     function _attemptBuy(SignedListing memory o, address buyer, uint256 fee, uint256 total) internal {
+        // Read before the prank below, which the next call takes, a view call included
+        bool burnsAll =
+            isWallet[o.seller] && HandlerWallet(payable(o.seller)).receiveMode() == HandlerWallet.ReceiveMode.BurnAll;
         bytes memory sig = _signListing(
             o.seller, actorPk[o.seller], o.bondId, o.price, o.maturity, o.expiration, o.nonce, o.globalNonce
         );
@@ -941,16 +944,21 @@ contract CofferMarketplaceHandler is Test {
         bytes4 expected = _expectedBuyRevert(o, buyer, total - o.price - fee);
         if (expected != bytes4(0)) {
             vm.prank(buyer);
-            // The two rows raised past the nonce bump start in the wallet's frame, so no reverter is named
+            // The three rows raised past the nonce bump start in a wallet's frame, so no reverter is named
             if (
                 expected == HandlerWallet.HookRejected.selector
+                    || expected == CofferMarketplace.SellerPaymentFailed.selector
                     || expected == CofferMarketplace.InsufficientPayment.selector
             ) {
                 vm.expectRevert(expected);
             } else {
                 vm.expectRevert(expected, address(marketplace));
             }
-            _callBuy(o, total, sig);
+            if (burnsAll) {
+                _callBuyBounded(o, total, sig);
+            } else {
+                _callBuy(o, total, sig);
+            }
             ++ghostBuyRejectedBySelector[expected];
             return;
         }
@@ -963,17 +971,12 @@ contract CofferMarketplaceHandler is Test {
             marketWeth: weth.balanceOf(address(marketplace)),
             hookCalls: isWallet[buyer] ? HandlerWallet(payable(buyer)).hookCalls() : 0
         });
-        bool ethLeg = _payoutInEth(o.seller);
 
         vm.prank(buyer);
         _callBuy(o, total, sig);
 
-        _assertBuySettled(o, buyer, fee, s, ethLeg);
+        _assertBuySettled(o, buyer, fee, s);
         ghostEthAccrued += fee;
-        if (!ethLeg) {
-            ghostWethMintedByFallback += o.price;
-            ++ghostFallbackPayouts;
-        }
         if (isWallet[o.seller] || isWallet[buyer]) ++ghostWalletFillsSettled;
 
         ++ghostListingNonce[o.seller][o.bondId];
@@ -990,7 +993,7 @@ contract CofferMarketplaceHandler is Test {
     /// @dev Mirrors the require order of buySignedListing after dropping the checks the handler
     ///      universe cannot trigger (ZeroPrice, the pre-bump InsufficientPayment). Returns 0 when the fill
     ///      must succeed. The wallet rows are InvalidSignature before the maturity checks and, past the nonce
-    ///      bump, the delivery hook and the refund.
+    ///      bump, the delivery hook, the seller payout and the refund.
     function _expectedBuyRevert(SignedListing memory o, address buyer, uint256 excess) internal view returns (bytes4) {
         if (buyer == o.seller) return CofferMarketplace.SameParty.selector;
         if (o.nonce != ghostListingNonce[o.seller][o.bondId]) return CofferMarketplace.ListingRevoked.selector;
@@ -1005,23 +1008,25 @@ contract CofferMarketplaceHandler is Test {
         uint128 live = coffer.maturityValues(o.bondId);
         if (live == 0) return CofferMarketplace.BondNotOutstanding.selector;
         if (live != o.maturity) return CofferMarketplace.MaturityValueMismatch.selector;
-        // Past the nonce bump: the delivery hook of a wallet buyer, then the refund to a wallet that rejects ETH
-        if (isWallet[buyer]) {
-            HandlerWallet w = HandlerWallet(payable(buyer));
-            if (w.hookRejects()) return HandlerWallet.HookRejected.selector;
-            if (excess > 0 && w.receiveMode() == HandlerWallet.ReceiveMode.Reject) {
-                return CofferMarketplace.InsufficientPayment.selector;
-            }
+        // Past the nonce bump: the delivery hook of a wallet buyer, the payout to a wallet seller, then the
+        // refund to a wallet buyer that rejects ETH
+        if (isWallet[buyer] && HandlerWallet(payable(buyer)).hookRejects()) return HandlerWallet.HookRejected.selector;
+        if (_payoutFails(o.seller)) return CofferMarketplace.SellerPaymentFailed.selector;
+        if (
+            isWallet[buyer] && excess > 0
+                && HandlerWallet(payable(buyer)).receiveMode() == HandlerWallet.ReceiveMode.Reject
+        ) {
+            return CofferMarketplace.InsufficientPayment.selector;
         }
         return bytes4(0);
     }
 
-    /// @dev The listing payout leg: ETH for an EOA and for a wallet whose receive accepts or stays under the
-    ///      bound, WETH through the fallback for every other wallet mode.
-    function _payoutInEth(address seller) internal view returns (bool) {
-        if (!isWallet[seller]) return true;
+    /// @dev The listing payout to a wallet seller in Reject or BurnAll mode fails, which reverts the whole fill.
+    ///      An EOA and every other wallet mode take the ETH.
+    function _payoutFails(address seller) internal view returns (bool) {
+        if (!isWallet[seller]) return false;
         HandlerWallet.ReceiveMode m = HandlerWallet(payable(seller)).receiveMode();
-        return m == HandlerWallet.ReceiveMode.Accept || m == HandlerWallet.ReceiveMode.SpendUnder;
+        return m == HandlerWallet.ReceiveMode.Reject || m == HandlerWallet.ReceiveMode.BurnAll;
     }
 
     function _callBuy(SignedListing memory o, uint256 value, bytes memory sig) internal {
@@ -1030,20 +1035,19 @@ contract CofferMarketplaceHandler is Test {
         );
     }
 
-    /// @dev The seller is paid the price in exactly one asset, decided by its receive alone, the marketplace's
-    ///      own WETH never moves on a listing fill, and a wallet buyer's hook ran exactly once.
-    function _assertBuySettled(SignedListing memory o, address buyer, uint256 fee, BuySnapshot memory s, bool ethLeg)
-        internal
-        view
-    {
+    /// @dev _callBuy at BURN_ALL_FILL_GAS, for a seller that burns everything it is sent.
+    function _callBuyBounded(SignedListing memory o, uint256 value, bytes memory sig) internal {
+        marketplace.buySignedListing{value: value, gas: BURN_ALL_FILL_GAS}(
+            o.bondId, o.seller, o.price, o.maturity, o.expiration, o.nonce, o.globalNonce, sig
+        );
+    }
+
+    /// @dev The seller is paid exactly the price in ETH, no WETH moves on a listing fill, and a wallet buyer's
+    ///      hook ran exactly once.
+    function _assertBuySettled(SignedListing memory o, address buyer, uint256 fee, BuySnapshot memory s) internal view {
         assertEq(bondNft.ownerOf(o.bondId), buyer, "buy: NFT not delivered to buyer");
-        if (ethLeg) {
-            assertEq(o.seller.balance, s.sellerEth + o.price, "buy: seller not paid exactly price in ETH");
-            assertEq(weth.balanceOf(o.seller), s.sellerWeth, "buy: WETH paid on the ETH leg");
-        } else {
-            assertEq(o.seller.balance, s.sellerEth, "buy: ETH reached a seller that cannot take it");
-            assertEq(weth.balanceOf(o.seller), s.sellerWeth + o.price, "buy: fallback paid other than price in WETH");
-        }
+        assertEq(o.seller.balance, s.sellerEth + o.price, "buy: seller not paid exactly price in ETH");
+        assertEq(weth.balanceOf(o.seller), s.sellerWeth, "buy: WETH paid to the seller");
         assertEq(weth.balanceOf(address(marketplace)), s.marketWeth, "buy: a listing fill moved the marketplace's WETH");
         assertEq(buyer.balance, s.buyerEth - o.price - fee, "buy: buyer charged other than price + fee");
         assertEq(address(marketplace).balance, s.marketEth + fee, "buy: marketplace balance moved by other than fee");
